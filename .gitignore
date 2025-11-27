@@ -1,0 +1,11 @@
+# Datasets
+*.csv
+*.json
+
+
+# ENV Files
+.env
+
+# Python
+__pycache__/
+*/__pycache__/
