@@ -7,6 +7,8 @@ from typing import List, Dict, Any
 from fastapi import UploadFile, HTTPException
 import structlog
 import anyio
+from uuid import uuid4
+
 
 from config.settings import settings
 from utils.validators import file_validator
