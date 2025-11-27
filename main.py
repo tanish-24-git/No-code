@@ -9,8 +9,7 @@ from uuid import uuid4
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, BackgroundTasks, Body
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
+# slowapi imports are optional now — handled below
 import structlog
 import uvicorn
 from pydantic import BaseModel
@@ -29,13 +28,29 @@ from app.redis_client import redis_client
 
 # Logging
 structlog.configure(processors=[structlog.stdlib.filter_by_level, structlog.stdlib.add_log_level,
-                                 structlog.processors.TimeStamper(fmt="iso"), structlog.processors.JSONRenderer()],
+                                 structlog.processors.TimeStamper(fmt="iso"), structlog.processors.JSONRenderer() ],
                     wrapper_class=structlog.stdlib.BoundLogger, logger_factory=structlog.stdlib.LoggerFactory())
 logger = structlog.get_logger()
 
 app = FastAPI(title="No-Code ML Platform API", description="Backend API for training ML models without code", version="1.0.0")
 
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# Optional: rate limiting with slowapi
+# slowapi is not included in requirements.txt by default to avoid redis version conflicts.
+# If slowapi is installed in your environment and compatible, this will enable the handler.
+try:
+    import importlib
+    slowapi_module = importlib.util.find_spec("slowapi")
+    if slowapi_module is not None:
+        from slowapi import _rate_limit_exceeded_handler
+        from slowapi.errors import RateLimitExceeded
+        app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+        logger.info("slowapi loaded: rate limiting enabled")
+    else:
+        logger.warning("slowapi not installed — rate limiting disabled (safe to proceed)")
+except Exception:
+    logger.warning("slowapi not installed — rate limiting disabled (safe to proceed)")
+
+# Platform-level exception handlers
 app.add_exception_handler(MLPlatformException, mlplatform_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
 
