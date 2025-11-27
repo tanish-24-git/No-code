@@ -9,7 +9,6 @@ import structlog
 import anyio
 from uuid import uuid4
 
-
 from config.settings import settings
 from utils.validators import file_validator
 from services.insight_service import InsightService
@@ -86,8 +85,16 @@ class FileService:
             # Prepare sample rows CSV for LLM (bounded)
             sample_csv = sample_df.head(50).to_csv(index=False)
 
-            # Ask LLM to augment suggestions (if configured)
-            llm_suggestions = await self.llm_service.analyze_dataset(summary, sample_csv)
+            # Ask LLM to augment suggestions (if configured) — make this optional
+            llm_suggestions = {}
+            try:
+                if self.llm_service and (self.llm_service.api_url or self.llm_service.provider == "vertex"):
+                    llm_suggestions = await self.llm_service.analyze_dataset(summary, sample_csv) or {}
+                else:
+                    logger.info("LLM not configured or API URL missing; skipping LLM augmentation")
+            except Exception as e:
+                logger.warning("LLM analyze failed — continuing with heuristic insights", error=str(e))
+                llm_suggestions = {}
 
             # Merge suggestions (LLM may override heuristic recommendations)
             merged = {
@@ -99,9 +106,9 @@ class FileService:
                 "llm_suggestions": llm_suggestions
             }
 
-            # If LLM gives improved insights, append them to insights
+            # If LLM gives improved insights, append or set them
             if llm_suggestions:
-                if isinstance(llm_suggestions.get("feature_engineering"), list):
+                if isinstance(llm_suggestions.get("feature_engineering"), list) and llm_suggestions.get("feature_engineering"):
                     merged["insights"].append("LLM suggested feature engineering: " + ", ".join(llm_suggestions.get("feature_engineering")))
                 if llm_suggestions.get("suggested_task"):
                     merged["suggested_task_type"] = llm_suggestions.get("suggested_task")
