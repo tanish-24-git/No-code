@@ -9,7 +9,6 @@ from uuid import uuid4
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, BackgroundTasks, Body
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-# slowapi imports are optional now — handled below
 import structlog
 import uvicorn
 from pydantic import BaseModel
@@ -27,16 +26,25 @@ from utils.exceptions import (
 from app.redis_client import redis_client
 
 # Logging
-structlog.configure(processors=[structlog.stdlib.filter_by_level, structlog.stdlib.add_log_level,
-                                 structlog.processors.TimeStamper(fmt="iso"), structlog.processors.JSONRenderer() ],
-                    wrapper_class=structlog.stdlib.BoundLogger, logger_factory=structlog.stdlib.LoggerFactory())
+structlog.configure(
+    processors=[
+        structlog.stdlib.filter_by_level,
+        structlog.stdlib.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.JSONRenderer()
+    ],
+    wrapper_class=structlog.stdlib.BoundLogger,
+    logger_factory=structlog.stdlib.LoggerFactory()
+)
 logger = structlog.get_logger()
 
-app = FastAPI(title="No-Code ML Platform API", description="Backend API for training ML models without code", version="1.0.0")
+app = FastAPI(
+    title="No-Code ML Platform API",
+    description="Backend API for training ML models without code",
+    version="1.0.0"
+)
 
-# Optional: rate limiting with slowapi
-# slowapi is not included in requirements.txt by default to avoid redis version conflicts.
-# If slowapi is installed in your environment and compatible, this will enable the handler.
+# Optional: rate limiting with slowapi (safe if not installed)
 try:
     import importlib
     slowapi_module = importlib.util.find_spec("slowapi")
@@ -46,15 +54,21 @@ try:
         app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
         logger.info("slowapi loaded: rate limiting enabled")
     else:
-        logger.warning("slowapi not installed — rate limiting disabled (safe to proceed)")
+        logger.debug("slowapi not installed — rate limiting disabled")
 except Exception:
-    logger.warning("slowapi not installed — rate limiting disabled (safe to proceed)")
+    logger.debug("slowapi not installed — rate limiting disabled (safe to proceed)")
 
 # Platform-level exception handlers
 app.add_exception_handler(MLPlatformException, mlplatform_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
 
-app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
 
 # services
 file_service = FileService()
@@ -72,22 +86,35 @@ MAX_FILES_PER_UPLOAD = int(os.getenv("MAX_FILES_PER_UPLOAD", 10))
 def job_key(job_id: str) -> str:
     return f"job:{job_id}"
 
-# Train job background function
+# Train job background function (defensive + logs)
 async def train_job_async(preprocessed_file: str, task_type: str, model_type: str, target_column: Any, job_id: str):
     logger.info("Job started", job_id=job_id, file=preprocessed_file)
-    await redis_client.hset(job_key(job_id), mapping={"status": "running", "started_at": anyio.current_time().__str__()})
+    try:
+        await redis_client.hset(job_key(job_id), mapping={"status": "running", "started_at": anyio.current_time().__str__()})
+    except Exception as e:
+        logger.warning("Could not set redis job metadata (non-fatal)", error=str(e))
+
     try:
         train_fn = async_ml_service.train_model_async
         if inspect.iscoroutinefunction(train_fn):
             result = await train_fn(file_path=preprocessed_file, task_type=task_type, model_type=model_type, target_column=target_column)
         else:
             result = await anyio.to_thread.run_sync(train_fn, preprocessed_file, task_type, model_type, target_column)
+
         # persist result
-        await redis_client.hset(job_key(job_id), mapping={"status":"completed", "result": json.dumps(result)})
+        try:
+            await redis_client.hset(job_key(job_id), mapping={"status":"completed", "result": json.dumps(result)})
+        except Exception as e:
+            logger.warning("Failed to persist job result to redis (non-fatal)", error=str(e))
         logger.info("Job completed", job_id=job_id)
     except Exception as e:
-        logger.error("Job failed", job_id=job_id, error=str(e))
-        await redis_client.hset(job_key(job_id), mapping={"status":"failed", "error": str(e)})
+        import traceback
+        tb = traceback.format_exc()
+        logger.error("Job failed", job_id=job_id, error=str(e), traceback=tb)
+        try:
+            await redis_client.hset(job_key(job_id), mapping={"status":"failed", "error": str(e)})
+        except Exception:
+            logger.warning("Failed to write job failure to redis")
 
 # Pydantic predict request
 class PredictRequest(BaseModel):
@@ -138,7 +165,10 @@ async def preprocess_data(request: Request, files: List[UploadFile] = File(...),
             preprocessed_path = await anyio.to_thread.run_sync(preprocessing_service.preprocess_dataset,
                                                                 saved_path, missing_strategy, scaling, encoding, target_column, selected_features)
             # Optionally register mapping in redis
-            await redis_client.hset("file_metadata", Path(preprocessed_path).name, original_name)
+            try:
+                await redis_client.hset("file_metadata", Path(preprocessed_path).name, original_name)
+            except Exception as e:
+                logger.warning("Could not register file metadata in redis (non-fatal)", error=str(e))
             results[original_name] = {"preprocessed_file": preprocessed_path}
         logger.info("Successfully preprocessed files", count=len(files))
         return PreprocessResponse(message="Preprocessing completed", files=results)
@@ -162,14 +192,23 @@ async def train_models(request: Request, background_tasks: BackgroundTasks,
         returned_jobs = []
         for preprocessed_file in preprocessed_filenames:
             resolved_path = Path(preprocessed_file)
+            # if not absolute/existing, try inside upload directory
             if not resolved_path.exists():
-                # try resolve via redis file_metadata map
-                mapped = await redis_client.hget("file_metadata", Path(preprocessed_file).name)
-                if mapped:
-                    # find stored name
-                    resolved_path = Path(settings.upload_directory) / preprocessed_file
+                candidate = Path(settings.upload_directory) / preprocessed_file
+                if candidate.exists():
+                    resolved_path = candidate
                 else:
-                    raise ModelTrainingError(f"Preprocessed file not found: {preprocessed_file}")
+                    candidate2 = Path(preprocessed_file).name
+                    candidate3 = Path(settings.upload_directory) / candidate2
+                    if candidate3.exists():
+                        resolved_path = candidate3
+                    else:
+                        # try to look up mapping in redis
+                        mapped = await redis_client.hget("file_metadata", Path(preprocessed_file).name)
+                        if mapped:
+                            resolved_path = Path(mapped)
+                        else:
+                            raise ModelTrainingError(f"Preprocessed file not found: {preprocessed_file}")
             filename = resolved_path.name
             if filename.startswith("preprocessed_"):
                 filename_no_prefix = filename[len("preprocessed_"):]
@@ -177,7 +216,10 @@ async def train_models(request: Request, background_tasks: BackgroundTasks,
                 filename_no_prefix = filename
             file_target = target_columns.get(filename_no_prefix, target_column if isinstance(target_column, str) else None)
             job_id = uuid4().hex
-            await redis_client.hset(job_key(job_id), mapping={"status":"pending", "file": str(resolved_path)})
+            try:
+                await redis_client.hset(job_key(job_id), mapping={"status":"pending", "file": str(resolved_path)})
+            except Exception as e:
+                logger.warning("Could not write job pending status to redis (non-fatal)", error=str(e))
             background_tasks.add_task(train_job_async, str(resolved_path), task_type, model_type, file_target, job_id)
             returned_jobs.append({"file": str(resolved_path), "job_id": job_id})
         logger.info("Training jobs scheduled", count=len(returned_jobs))
