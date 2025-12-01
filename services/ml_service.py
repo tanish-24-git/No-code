@@ -8,6 +8,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import structlog
+import json
 
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import (
@@ -101,6 +102,30 @@ class MLService:
                 # Remove heavy object before returning
                 if "model" in result:
                     del result["model"]
+
+                # Save model metadata (features, plan sidecar link if available)
+                try:
+                    # features: infer from the preprocessed CSV header (exclude target column if present)
+                    df_pre = pd.read_csv(file_path, nrows=1)
+                    features = list(df_pre.columns)
+                    # if target_column present, remove from feature list
+                    if target_column and target_column in features:
+                        features = [c for c in features if c != target_column]
+
+                    metadata = {
+                        "model_file": model_path.name,
+                        "features": features,
+                        "trained_on": Path(file_path).name,
+                        "task_type": task_type,
+                        "model_type": model_type,
+                        "created_at": time.time(),
+                        "metrics": result.get("results", {})
+                    }
+                    meta_path = model_path.with_suffix(".json")
+                    with open(meta_path, "w", encoding="utf-8") as fh:
+                        json.dump(metadata, fh, indent=2)
+                except Exception as e:
+                    logger.warning("Failed to save model metadata sidecar", error=str(e))
 
             logger.info(f"Model training completed: {task_type}/{model_type}", file=str(file_path))
             return result
@@ -347,22 +372,37 @@ class AsyncMLService:
         except Exception as e:
             raise ModelTrainingError(f"Failed to load model: {str(e)}")
 
+        # Load metadata sidecar if exists to align features
+        meta_path = model_path.with_suffix(".json")
+        expected_features = None
+        if meta_path.exists():
+            try:
+                with open(meta_path, "r", encoding="utf-8") as fh:
+                    meta = json.load(fh)
+                    expected_features = meta.get("features", None)
+            except Exception:
+                expected_features = None
+
         # Convert input data to DataFrame
         input_df = pd.DataFrame([data])
 
-        # Align input columns if possible
+        # Align input columns if possible using metadata
+        if expected_features:
+            for col in expected_features:
+                if col not in input_df.columns:
+                    input_df[col] = np.nan
+            input_df = input_df[expected_features]
+
+        # If model has feature_names_in_, try to align (fallback)
         try:
-            # some models expect specific feature ordering - try to subset/align if model has 'feature_names_in_'
             if hasattr(model, 'feature_names_in_'):
                 expected = list(model.feature_names_in_)
-                # add missing expected columns with NaN (will error if model can't handle)
                 for col in expected:
                     if col not in input_df.columns:
                         input_df[col] = np.nan
                 input_df = input_df[expected]
         except Exception:
-            # if any of the alignment fails, continue with given input_df (model may accept it)
-            logger.debug("Prediction input alignment failed or not needed; proceeding with provided inputs")
+            pass
 
         # Make prediction
         try:
@@ -378,7 +418,6 @@ class AsyncMLService:
         except Exception:
             probabilities = None
 
-        # ensure lists are JSON serializable
         pred_list = prediction.tolist() if hasattr(prediction, 'tolist') else [prediction]
 
         return {

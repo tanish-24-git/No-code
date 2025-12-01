@@ -2,7 +2,7 @@
 import os
 import json
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import anyio
 import inspect
 from uuid import uuid4
@@ -77,7 +77,7 @@ ml_service = MLService()
 async_ml_service = AsyncMLService()
 
 # Ensure upload dir
-os.makedirs(settings.upload_directory, exist_ok=True)
+Path(settings.upload_directory).mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR = Path(settings.upload_directory).resolve()
 MAX_BYTES = getattr(settings, "max_file_size_mb", 100) * 1024 * 1024
 MAX_FILES_PER_UPLOAD = int(os.getenv("MAX_FILES_PER_UPLOAD", 10))
@@ -85,6 +85,26 @@ MAX_FILES_PER_UPLOAD = int(os.getenv("MAX_FILES_PER_UPLOAD", 10))
 # Helper: job keys in redis
 def job_key(job_id: str) -> str:
     return f"job:{job_id}"
+
+# Startup / shutdown events
+@app.on_event("startup")
+async def on_startup():
+    logger.info("Application starting", host=settings.api_host, port=settings.api_port)
+    try:
+        Path(settings.upload_directory).mkdir(parents=True, exist_ok=True)
+        logger.info("Upload directory ready", upload_dir=str(Path(settings.upload_directory).resolve()))
+    except Exception as e:
+        logger.error("Failed to ensure upload directory", error=str(e))
+    # Redis health (non-fatal)
+    try:
+        pong = await redis_client.ping()
+        logger.info("Redis ping success", pong=pong)
+    except Exception as e:
+        logger.warning("Redis ping failed at startup (will attempt reconnects during runtime)", error=str(e))
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    logger.info("Shutting down application")
 
 # Train job background function (defensive + logs)
 async def train_job_async(preprocessed_file: str, task_type: str, model_type: str, target_column: Any, job_id: str):
@@ -132,8 +152,9 @@ async def upload_files(request: Request, files: List[UploadFile] = File(...)):
             logger.info("Processing file", filename=original_name)
             # Save + validate (streaming)
             stored_path = await file_service.save_uploaded_file(upload)
-            # Analyze dataset (async)
+            # Analyze dataset (async) -> returns heuristics + optionally llm suggestions
             analysis = await file_service.analyze_dataset(stored_path)
+            # Return analysis which includes "llm_suggestions" and we also include suggested column actions if available
             results[original_name] = analysis
         logger.info("Successfully processed files", count=len(files))
         return UploadResponse(message="Files uploaded successfully", files=results)
@@ -144,33 +165,69 @@ async def upload_files(request: Request, files: List[UploadFile] = File(...)):
         raise DatasetError(f"Failed to process uploaded files: {str(e)}")
 
 @app.post("/preprocess", response_model=PreprocessResponse)
-async def preprocess_data(request: Request, files: List[UploadFile] = File(...), missing_strategy: str = Form(...),
-                          scaling: bool = Form(...), encoding: str = Form(...), target_column: str = Form(None),
-                          selected_features_json: str = Form(None)):
+async def preprocess_data(
+    request: Request,
+    files: Optional[List[UploadFile]] = File(None),
+    preprocessing_plan: Optional[str] = Form(None),  # JSON string when using multipart/form-data
+    body_plan: Optional[Dict[str, Any]] = Body(None)  # JSON body alternative
+):
+    """
+    Accepts either:
+     - multipart form with files + preprocessing_plan (JSON string in form), OR
+     - JSON body with {"files": ["uploaded_filename.csv"], "plan": {...}} where files are names already uploaded.
+    """
     try:
-        validate_preprocessing_params(missing_strategy, encoding, target_column)
-        selected_features_dict = {}
-        if selected_features_json:
+        # harmonize plan
+        plan = {}
+        if preprocessing_plan:
             try:
-                selected_features_dict = json.loads(selected_features_json)
-            except json.JSONDecodeError:
-                raise ValidationError("Invalid selected_features_json format")
+                plan = json.loads(preprocessing_plan)
+            except Exception:
+                raise ValidationError("Invalid preprocessing_plan JSON")
+        elif body_plan:
+            # If JSON passed in body, it may contain the plan directly or a wrapper.
+            # Accept either {"plan": {...}, "files": [...]} or {...} as the plan.
+            if "plan" in body_plan and isinstance(body_plan["plan"], dict):
+                plan = body_plan["plan"]
+            else:
+                plan = body_plan
+
         results = {}
-        for upload in files:
-            original_name = Path(upload.filename).name
-            logger.info("Preprocessing file", filename=original_name)
-            # save
-            saved_path = await file_service.save_uploaded_file(upload)
-            selected_features = selected_features_dict.get(original_name)
-            preprocessed_path = await anyio.to_thread.run_sync(preprocessing_service.preprocess_dataset,
-                                                                saved_path, missing_strategy, scaling, encoding, target_column, selected_features)
-            # Optionally register mapping in redis
-            try:
-                await redis_client.hset("file_metadata", Path(preprocessed_path).name, original_name)
-            except Exception as e:
-                logger.warning("Could not register file metadata in redis (non-fatal)", error=str(e))
-            results[original_name] = {"preprocessed_file": preprocessed_path}
-        logger.info("Successfully preprocessed files", count=len(files))
+        if files:
+            # If files uploaded now, process them
+            for upload in files:
+                original_name = Path(upload.filename).name
+                logger.info("Preprocessing uploaded file", filename=original_name)
+                saved_path = await file_service.save_uploaded_file(upload)
+                # Call preprocess with plan (blocking on thread to avoid CPU blocking the event loop)
+                preprocessed_path = await anyio.to_thread.run_sync(preprocessing_service.preprocess_dataset,
+                                                                    saved_path, plan)
+                # Save plan sidecar path is handled by preprocess_dataset
+                # Optionally register mapping in redis
+                try:
+                    await redis_client.hset("file_metadata", Path(preprocessed_path).name, original_name)
+                except Exception as e:
+                    logger.warning("Could not register file metadata in redis (non-fatal)", error=str(e))
+                results[original_name] = {"preprocessed_file": preprocessed_path}
+        else:
+            # No files in multipart — maybe the user sent paths in the body_plan
+            files_list = body_plan.get("files") if isinstance(body_plan, dict) else None
+            if not files_list or not isinstance(files_list, list):
+                raise ValidationError("No files provided for preprocessing")
+            for server_filename in files_list:
+                # Resolve to upload directory
+                candidate = Path(settings.upload_directory) / Path(server_filename).name
+                if not candidate.exists():
+                    raise ValidationError(f"Referenced file not found on server: {server_filename}")
+                preprocessed_path = await anyio.to_thread.run_sync(preprocessing_service.preprocess_dataset,
+                                                                    str(candidate), plan)
+                try:
+                    await redis_client.hset("file_metadata", Path(preprocessed_path).name, candidate.name)
+                except Exception:
+                    pass
+                results[candidate.name] = {"preprocessed_file": preprocessed_path}
+
+        logger.info("Successfully preprocessed files", count=len(results))
         return PreprocessResponse(message="Preprocessing completed", files=results)
     except Exception as e:
         logger.error("Preprocessing error", error=str(e))
@@ -180,15 +237,23 @@ async def preprocess_data(request: Request, files: List[UploadFile] = File(...),
 
 @app.post("/train")
 async def train_models(request: Request, background_tasks: BackgroundTasks,
-                       preprocessed_filenames: List[str] = Form(...), target_column: str = Form(None),
+                       preprocessed_filenames: List[str] = Form(None),  # form-list style
+                       body_json: Optional[Dict[str, Any]] = Body(None),  # JSON alternative
+                       target_column: str = Form(None),
                        task_type: str = Form(...), model_type: str = Form(None)):
+    """
+    Accepts either:
+     - form fields: preprocessed_filenames repeated, OR
+     - JSON body: { "preprocessed_filenames": ["a","b"], "target_column": "...", "task_type":"...", "model_type":"..." }
+    """
     try:
-        target_columns = {}
-        if target_column:
-            try:
-                target_columns = json.loads(target_column)
-            except json.JSONDecodeError:
-                target_columns = {}
+        # harmonize JSON body if provided
+        if (not preprocessed_filenames or len(preprocessed_filenames) == 0) and body_json:
+            preprocessed_filenames = body_json.get("preprocessed_filenames", [])
+            target_column = target_column or body_json.get("target_column")
+            task_type = body_json.get("task_type", task_type)
+            model_type = body_json.get("model_type", model_type)
+
         returned_jobs = []
         for preprocessed_file in preprocessed_filenames:
             resolved_path = Path(preprocessed_file)
@@ -206,15 +271,23 @@ async def train_models(request: Request, background_tasks: BackgroundTasks,
                         # try to look up mapping in redis
                         mapped = await redis_client.hget("file_metadata", Path(preprocessed_file).name)
                         if mapped:
-                            resolved_path = Path(mapped)
+                            resolved_path = Path(settings.upload_directory) / mapped
                         else:
                             raise ModelTrainingError(f"Preprocessed file not found: {preprocessed_file}")
+
             filename = resolved_path.name
             if filename.startswith("preprocessed_"):
                 filename_no_prefix = filename[len("preprocessed_"):]
             else:
                 filename_no_prefix = filename
-            file_target = target_columns.get(filename_no_prefix, target_column if isinstance(target_column, str) else None)
+            file_target = None
+            if target_column:
+                try:
+                    # target_column might be JSON map in some clients
+                    parsed = json.loads(target_column)
+                    file_target = parsed.get(filename_no_prefix)
+                except Exception:
+                    file_target = target_column
             job_id = uuid4().hex
             try:
                 await redis_client.hset(job_key(job_id), mapping={"status":"pending", "file": str(resolved_path)})
@@ -245,8 +318,13 @@ async def get_job_status(job_id: str):
 
 @app.post("/models/{model_id}/predict")
 async def predict(request: Request, model_id: str, payload: PredictRequest = Body(...)):
+    """
+    Accept model_id either with or without extension (e.g., preprocessed_small OR preprocessed_small.csv).
+    Prediction aligns inputs to model metadata if available.
+    """
     try:
-        safe_model_id = Path(model_id).name
+        # sanitize model_id and strip common extensions
+        safe_model_id = Path(model_id).stem
         model_filename = f"trained_model_{safe_model_id}.pkl"
         model_path = UPLOAD_DIR / model_filename
         if not model_path.exists():

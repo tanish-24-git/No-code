@@ -20,13 +20,22 @@ class EncodingMethod(str, Enum):
     LABEL = "label"
     TARGET = "target"
     KFOLD = "kfold"
+    PASSTHROUGH = "passthrough"
+
+class ColumnAction(BaseModel):
+    action: Optional[str] = "keep"          # keep | drop | custom
+    missing_strategy: Optional[MissingStrategy] = None
+    scaling: Optional[bool] = None
+    encoding: Optional[EncodingMethod] = None
+    custom_transform: Optional[str] = None  # name of allowed custom transform
 
 class PreprocessRequest(BaseModel):
-    missing_strategy: MissingStrategy
-    scaling: bool = True
-    encoding: EncodingMethod
+    # global defaults
+    global_defaults: Optional[Dict[str, Any]] = {}
+    # per-column overrides
+    columns: Optional[Dict[str, ColumnAction]] = {}
+    # fallback target column if any
     target_column: Optional[str] = None
-    selected_features: Optional[Dict[str, List[str]]] = None
 
 class TrainRequest(BaseModel):
     task_type: TaskType
