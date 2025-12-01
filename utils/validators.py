@@ -17,6 +17,10 @@ MALICIOUS_SIGNATURES = {
     b'\x89\x50\x4e\x47',  # PNG
 }
 
+# Behavior toggle: allow duplicate uploads (default True while developing).
+# If you want to enforce duplicate blocking set ALLOW_DUPLICATE_UPLOADS=0 in env.
+ALLOW_DUPLICATE_UPLOADS = os.getenv("ALLOW_DUPLICATE_UPLOADS", "1") not in ("0", "false", "False")
+
 class EnhancedFileValidator:
     def __init__(self):
         self.max_file_size = settings.max_file_size_mb * 1024 * 1024
@@ -49,13 +53,14 @@ class EnhancedFileValidator:
             if prefix.startswith(signature):
                 raise HTTPException(status_code=400, detail="Potentially malicious file detected")
 
-        # If file is small (<= max_file_size * 2), read and compute hash; else compute rolling hash by reading in chunks
-        # We'll compute MD5 by streaming in background if the caller later fully streams to disk.
-        # For now, compute hash from prefix only (fast duplicate detection heuristic)
+        # Compute a fast hash (MD5 of first 64KB). Use this only as a heuristic for duplicate detection.
         file_hash = hashlib.md5(prefix).hexdigest()
         if file_hash in self.uploaded_hashes:
-            raise HTTPException(status_code=400, detail="Duplicate file detected")
-        self.uploaded_hashes.add(file_hash)
+            if not ALLOW_DUPLICATE_UPLOADS:
+                raise HTTPException(status_code=400, detail="Duplicate file detected")
+            # if duplicates allowed, we just warn & continue (do not block)
+        else:
+            self.uploaded_hashes.add(file_hash)
 
         # If CSV: try reading the first few rows only to detect structure (nrows)
         if ext == '.csv':

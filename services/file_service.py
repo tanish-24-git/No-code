@@ -9,6 +9,7 @@ import structlog
 import anyio
 from uuid import uuid4
 
+
 from config.settings import settings
 from utils.validators import file_validator
 from services.insight_service import InsightService
