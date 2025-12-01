@@ -18,6 +18,10 @@ class LLMService:
         self.google_location = settings.google_location
         self.vertex_model_id = settings.vertex_model_id
 
+        # sensible defaults
+        self._http_timeout = 60  # seconds for generic provider
+        self._vertex_timeout = 120
+
     async def analyze_dataset(self, summary: Dict[str, Any], sample_rows: str) -> Dict[str, Any]:
         """
         Returns LLM suggestions or {} on any failure.
@@ -27,7 +31,7 @@ class LLMService:
         logger.info("LLM analyze dataset", provider=self.provider)
 
         try:
-            # if there's no api_url configured, skip
+            # if there's no api_url configured, skip (unless using vertex)
             if not self.api_url and self.provider != "vertex":
                 logger.info("No LLM API URL configured; skipping LLM call")
                 return {}
@@ -51,7 +55,7 @@ You are a data scientist assistant. Given the dataset summary and a small sample
  - confidence: number between 0 and 1
 
 Dataset summary: {json.dumps(summary)}
-Sample rows (CSV): 
+Sample rows (CSV):
 {sample_rows}
 
 Return ONLY valid JSON and nothing else.
@@ -68,10 +72,11 @@ Return ONLY valid JSON and nothing else.
         payload = {"prompt": prompt, "max_tokens": 512, "temperature": 0.0}
 
         try:
-            async with httpx.AsyncClient(timeout=60) as client:
+            async with httpx.AsyncClient(timeout=self._http_timeout) as client:
                 r = await client.post(self.api_url, headers=headers, json=payload)
                 r.raise_for_status()
-                data = r.json()
+                # prefer text and attempt to parse JSON strictly
+                text = r.text
         except httpx.HTTPStatusError as e:
             logger.warning("LLM returned non-200 status", status=e.response.status_code, url=str(e.request.url))
             return {}
@@ -79,19 +84,49 @@ Return ONLY valid JSON and nothing else.
             logger.warning("LLM generic HTTP call failed", error=str(e))
             return {}
 
-        # Try to extract JSON text from common keys or fallback to raw JSON
-        text = None
-        for k in ("text", "generated_text", "output", "content"):
-            if k in data:
-                text = data[k]
-                break
-        if not text:
-            text = json.dumps(data)
-
+        # Try to extract JSON text from common shapes
         try:
-            return json.loads(text) if isinstance(text, str) else text
-        except Exception:
-            logger.warning("LLM response not JSON-parsable; returning raw under 'raw'")
+            # Many providers return {"text": "..."} or {"output": "..."} - try to parse top-level JSON first
+            parsed_top = None
+            try:
+                parsed_top = json.loads(text)
+            except Exception:
+                parsed_top = None
+
+            if isinstance(parsed_top, dict):
+                # prefer fields that usually contain the model output
+                for k in ("text", "generated_text", "output", "content", "result"):
+                    if k in parsed_top:
+                        candidate = parsed_top[k]
+                        # if it's already structured JSON
+                        if isinstance(candidate, dict):
+                            return candidate
+                        if isinstance(candidate, str):
+                            try:
+                                return json.loads(candidate)
+                            except Exception:
+                                # try to extract JSON substring
+                                pass
+                # if parsed_top looks like final result, return it
+                # but ensure it contains expected keys; otherwise fall through to fallback below
+                if set(parsed_top.keys()) & {"suggested_task", "suggested_target", "missing_value_strategy"}:
+                    return parsed_top
+
+            # If we didn't return above, try to find a JSON substring in the text body
+            # find first '{' and last '}' and attempt parsing that slice (robust heuristic)
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                snippet = text[start:end+1]
+                try:
+                    return json.loads(snippet)
+                except Exception:
+                    pass
+
+            # final fallback: return the raw text under 'raw'
+            return {"raw": text}
+        except Exception as e:
+            logger.warning("Failed parsing LLM response", error=str(e))
             return {"raw": text}
 
     async def _call_vertex_predict(self, prompt: str) -> Dict[str, Any]:
@@ -107,16 +142,22 @@ Return ONLY valid JSON and nothing else.
             params["key"] = self.api_key
 
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(timeout=self._vertex_timeout) as client:
                 r = await client.post(url, headers=headers, params=params, json=body)
                 r.raise_for_status()
-                resp = r.json()
+                resp_text = r.text
         except httpx.HTTPStatusError as e:
             logger.warning("Vertex returned non-200", status=e.response.status_code)
             return {}
         except Exception as e:
             logger.warning("Vertex call failed", error=str(e))
             return {}
+
+        # Try parsing Vertex's response for JSON content
+        try:
+            resp = json.loads(resp_text)
+        except Exception:
+            resp = {}
 
         candidates = []
         if "predictions" in resp and len(resp["predictions"]) > 0:
