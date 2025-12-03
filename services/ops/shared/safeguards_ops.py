@@ -1,6 +1,7 @@
 # services/ops/shared/safeguards_ops.py
 from typing import List, Dict, Any, Tuple
 import psutil
+import pandas as pd
 import anyio
 OP_REGISTRY = {}
 

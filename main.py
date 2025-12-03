@@ -16,7 +16,8 @@ from config.settings import settings
 from models.requests import PreprocessRequest, TrainRequest
 from models.responses import UploadResponse, PreprocessResponse, TrainResponse
 from services.file_service import FileService
-from services.preprocessing_service import PreprocessingService
+# from services.preprocessing_service import PreprocessingService
+from services.preprocessing_service import preprocess_dataset as preprocessing_service
 from services.ml_service import MLService, AsyncMLService
 from utils.validators import file_validator, validate_preprocessing_params
 from utils.exceptions import (

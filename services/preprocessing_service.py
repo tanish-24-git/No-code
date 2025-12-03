@@ -1,23 +1,17 @@
-# services/preprocessing_service.py
 from pathlib import Path
 from typing import Dict, Any
 import structlog
 from config.settings import settings
 from services.preprocessing_engine import PreprocessingEngine
+
 logger = structlog.get_logger()
+
 # Single global engine instance
 _engine = PreprocessingEngine(settings.upload_directory)
+
 def preprocess_dataset(file_path: str, plan: Dict[str, Any]) -> str:
     """
     Thin synchronous wrapper expected by main.py and background tasks.
-    - file_path: path to the uploaded dataset (CSV)
-    - plan: dict describing preprocessing (mode, pipeline, or legacy plan)
-    Returns ONLY the preprocessed file path (string), to keep backward
-    compatibility with existing /preprocess endpoint and Pydantic response.
-    Internally, the engine also:
-      - Writes a .preprocess.json sidecar with metadata
-      - Collects warnings & transformer meta
-      - Can produce a preview (ignored here but accessible in engine output)
     """
     if not isinstance(plan, dict):
         raise ValueError("preprocessing plan must be a dict")
