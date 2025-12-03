@@ -24,7 +24,6 @@ from utils.exceptions import (
     general_exception_handler, DatasetError, ModelTrainingError, ValidationError, PreprocessingError
 )
 from app.redis_client import redis_client
-
 # Logging
 structlog.configure(
     processors=[
@@ -37,13 +36,11 @@ structlog.configure(
     logger_factory=structlog.stdlib.LoggerFactory()
 )
 logger = structlog.get_logger()
-
 app = FastAPI(
     title="No-Code ML Platform API",
     description="Backend API for training ML models without code",
     version="1.0.0"
 )
-
 # Optional: rate limiting with slowapi (safe if not installed)
 try:
     import importlib
@@ -57,11 +54,9 @@ try:
         logger.debug("slowapi not installed — rate limiting disabled")
 except Exception:
     logger.debug("slowapi not installed — rate limiting disabled (safe to proceed)")
-
 # Platform-level exception handlers
 app.add_exception_handler(MLPlatformException, mlplatform_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -69,23 +64,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"]
 )
-
 # services
 file_service = FileService()
 preprocessing_service = PreprocessingService()
 ml_service = MLService()
 async_ml_service = AsyncMLService()
-
 # Ensure upload dir
 Path(settings.upload_directory).mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR = Path(settings.upload_directory).resolve()
 MAX_BYTES = getattr(settings, "max_file_size_mb", 100) * 1024 * 1024
 MAX_FILES_PER_UPLOAD = int(os.getenv("MAX_FILES_PER_UPLOAD", 10))
-
 # Helper: job keys in redis
 def job_key(job_id: str) -> str:
     return f"job:{job_id}"
-
 # Startup / shutdown events
 @app.on_event("startup")
 async def on_startup():
@@ -101,11 +92,22 @@ async def on_startup():
         logger.info("Redis ping success", pong=pong)
     except Exception as e:
         logger.warning("Redis ping failed at startup (will attempt reconnects during runtime)", error=str(e))
-
+    # Check NLP libs
+    try:
+        import spacy
+        nlp = spacy.load("en_core_web_sm")
+        logger.info("spaCy loaded")
+    except Exception as e:
+        logger.error("spaCy init failed", e=str(e))
+    try:
+        import nltk
+        nltk.download('punkt', quiet=True)
+        logger.info("NLTK ready")
+    except Exception as e:
+        logger.error("NLTK init failed", e=str(e))
 @app.on_event("shutdown")
 async def on_shutdown():
     logger.info("Shutting down application")
-
 # Train job background function (defensive + logs)
 async def train_job_async(preprocessed_file: str, task_type: str, model_type: str, target_column: Any, job_id: str):
     logger.info("Job started", job_id=job_id, file=preprocessed_file)
@@ -113,14 +115,12 @@ async def train_job_async(preprocessed_file: str, task_type: str, model_type: st
         await redis_client.hset(job_key(job_id), mapping={"status": "running", "started_at": anyio.current_time().__str__()})
     except Exception as e:
         logger.warning("Could not set redis job metadata (non-fatal)", error=str(e))
-
     try:
         train_fn = async_ml_service.train_model_async
         if inspect.iscoroutinefunction(train_fn):
             result = await train_fn(file_path=preprocessed_file, task_type=task_type, model_type=model_type, target_column=target_column)
         else:
             result = await anyio.to_thread.run_sync(train_fn, preprocessed_file, task_type, model_type, target_column)
-
         # persist result
         try:
             await redis_client.hset(job_key(job_id), mapping={"status":"completed", "result": json.dumps(result)})
@@ -135,11 +135,9 @@ async def train_job_async(preprocessed_file: str, task_type: str, model_type: st
             await redis_client.hset(job_key(job_id), mapping={"status":"failed", "error": str(e)})
         except Exception:
             logger.warning("Failed to write job failure to redis")
-
 # Pydantic predict request
 class PredictRequest(BaseModel):
     inputs: Dict[str, Any]
-
 # Endpoints
 @app.post("/upload", response_model=UploadResponse)
 async def upload_files(request: Request, files: List[UploadFile] = File(...)):
@@ -163,13 +161,12 @@ async def upload_files(request: Request, files: List[UploadFile] = File(...)):
         if isinstance(e, HTTPException):
             raise e
         raise DatasetError(f"Failed to process uploaded files: {str(e)}")
-
 @app.post("/preprocess", response_model=PreprocessResponse)
 async def preprocess_data(
     request: Request,
     files: Optional[List[UploadFile]] = File(None),
-    preprocessing_plan: Optional[str] = Form(None),  # JSON string when using multipart/form-data
-    body_plan: Optional[Dict[str, Any]] = Body(None)  # JSON body alternative
+    preprocessing_plan: Optional[str] = Form(None), # JSON string when using multipart/form-data
+    body_plan: Optional[Dict[str, Any]] = Body(None) # JSON body alternative
 ):
     """
     Accepts either:
@@ -191,7 +188,6 @@ async def preprocess_data(
                 plan = body_plan["plan"]
             else:
                 plan = body_plan
-
         results = {}
         if files:
             # If files uploaded now, process them
@@ -226,7 +222,6 @@ async def preprocess_data(
                 except Exception:
                     pass
                 results[candidate.name] = {"preprocessed_file": preprocessed_path}
-
         logger.info("Successfully preprocessed files", count=len(results))
         return PreprocessResponse(message="Preprocessing completed", files=results)
     except Exception as e:
@@ -234,11 +229,10 @@ async def preprocess_data(
         if isinstance(e, (HTTPException, MLPlatformException)):
             raise e
         raise PreprocessingError(f"Preprocessing failed: {str(e)}")
-
 @app.post("/train")
 async def train_models(request: Request, background_tasks: BackgroundTasks,
-                       preprocessed_filenames: List[str] = Form(None),  # form-list style
-                       body_json: Optional[Dict[str, Any]] = Body(None),  # JSON alternative
+                       preprocessed_filenames: List[str] = Form(None), # form-list style
+                       body_json: Optional[Dict[str, Any]] = Body(None), # JSON alternative
                        target_column: str = Form(None),
                        task_type: str = Form(...), model_type: str = Form(None)):
     """
@@ -253,7 +247,6 @@ async def train_models(request: Request, background_tasks: BackgroundTasks,
             target_column = target_column or body_json.get("target_column")
             task_type = body_json.get("task_type", task_type)
             model_type = body_json.get("model_type", model_type)
-
         returned_jobs = []
         for preprocessed_file in preprocessed_filenames:
             resolved_path = Path(preprocessed_file)
@@ -274,7 +267,6 @@ async def train_models(request: Request, background_tasks: BackgroundTasks,
                             resolved_path = Path(settings.upload_directory) / mapped
                         else:
                             raise ModelTrainingError(f"Preprocessed file not found: {preprocessed_file}")
-
             filename = resolved_path.name
             if filename.startswith("preprocessed_"):
                 filename_no_prefix = filename[len("preprocessed_"):]
@@ -302,7 +294,6 @@ async def train_models(request: Request, background_tasks: BackgroundTasks,
         if isinstance(e, (HTTPException, MLPlatformException)):
             raise e
         raise ModelTrainingError(f"Model training scheduling failed: {str(e)}")
-
 @app.get("/jobs/{job_id}")
 async def get_job_status(job_id: str):
     data = await redis_client.hgetall(job_key(job_id))
@@ -315,7 +306,6 @@ async def get_job_status(job_id: str):
         except Exception:
             pass
     return data
-
 @app.post("/models/{model_id}/predict")
 async def predict(request: Request, model_id: str, payload: PredictRequest = Body(...)):
     """
@@ -338,7 +328,6 @@ async def predict(request: Request, model_id: str, payload: PredictRequest = Bod
         if isinstance(e, HTTPException):
             raise e
         raise ModelTrainingError(f"Prediction failed: {str(e)}")
-
 @app.get("/download-model/{filename}")
 async def download_model(filename: str):
     try:
@@ -354,10 +343,8 @@ async def download_model(filename: str):
     except Exception as e:
         logger.error("Model download error", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
-
 @app.get("/health")
 async def health_check():
     return {"status":"healthy", "message":"No-Code ML Platform API is running", "version":"1.0.0", "timestamp": anyio.current_time().__str__()}
-
 if __name__ == "__main__":
     uvicorn.run(app, host=settings.api_host, port=settings.api_port, reload=settings.debug)

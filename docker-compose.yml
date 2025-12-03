@@ -12,7 +12,6 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
-
   web:
     build: .
     container_name: no_code_ml_api
@@ -27,6 +26,5 @@ services:
       - ./uploads:/app/uploads
       - ./:/app
     restart: unless-stopped
-
 volumes:
   redis-data:

@@ -8,14 +8,11 @@ from fastapi import UploadFile, HTTPException
 import structlog
 import anyio
 from uuid import uuid4
-
 from config.settings import settings
 from utils.validators import file_validator
 from services.insight_service import InsightService
 from services.llm_service import LLMService
-
 logger = structlog.get_logger()
-
 class FileService:
     def __init__(self):
         self.upload_dir = Path(settings.upload_directory)
@@ -27,17 +24,14 @@ class FileService:
         except Exception as e:
             logger.warning("Failed to initialize LLMService; continuing without LLM", error=str(e))
             self.llm_service = None
-
     async def save_uploaded_file(self, file: UploadFile) -> str:
         """Stream Save uploaded file to disk (UUID-based name). Returns stored file path string."""
         # run light validation (filename, extension)
-        await file_validator.validate_file(file)  # this will do lightweight checks
-
+        await file_validator.validate_file(file) # this will do lightweight checks
         ext = Path(file.filename).suffix or ".csv"
         # make safe generated name
         stored_name = f"{uuid4().hex}{ext}"
         stored_path = self.upload_dir / stored_name
-
         # stream write
         await file.seek(0)
         async with aiofiles.open(stored_path, 'wb') as f:
@@ -46,7 +40,6 @@ class FileService:
                 if not chunk:
                     break
                 await f.write(chunk)
-
         logger.info("File saved", stored=stored_name, original=file.filename)
         # reset pointer for downstream consumers (best-effort)
         try:
@@ -56,9 +49,7 @@ class FileService:
                 file.file.seek(0)
             except Exception:
                 pass
-
         return str(stored_path)
-
     async def analyze_dataset(self, file_path: str) -> Dict[str, Any]:
         """
         Async dataset analysis:
@@ -73,7 +64,6 @@ class FileService:
                 # read sample (nrows small) to avoid OOM
                 df_sample = pd.read_csv(fp, nrows=500, encoding='utf-8', engine='python', on_bad_lines='skip')
                 df_summary = pd.read_csv(fp, nrows=1000, encoding='utf-8', engine='python', on_bad_lines='skip')
-
                 # safe row counting: iterate in text mode with errors ignored
                 row_count = 0
                 try:
@@ -86,7 +76,6 @@ class FileService:
                 except Exception:
                     # fallback estimate to number of rows read in df_summary
                     row_count = int(len(df_summary))
-
                 summary = {
                     "columns": list(df_summary.columns),
                     "rows": int(row_count),
@@ -97,15 +86,11 @@ class FileService:
                     "file_size_mb": os.path.getsize(fp) / (1024 * 1024)
                 }
                 return summary, df_sample
-
             summary, sample_df = await anyio.to_thread.run_sync(_read_sample_and_summary, file_path)
-
             # Heuristic insights (blocking small work on thread)
             insights_data = await anyio.to_thread.run_sync(self.insight_service.generate_insights, summary, sample_df)
-
             # Prepare sample rows CSV for LLM (bounded)
             sample_csv = sample_df.head(50).to_csv(index=False)
-
             # Ask LLM to augment suggestions (if configured) — make this optional and resilient
             llm_suggestions: Dict[str, Any] = {}
             if self.llm_service:
@@ -116,7 +101,6 @@ class FileService:
                     llm_suggestions = {}
             else:
                 logger.debug("LLMService not configured; skipping LLM augmentation")
-
             # Choose final suggested values preferring LLM if present, otherwise heuristic
             suggested_task_type = (
                 llm_suggestions.get("suggested_task")
@@ -124,21 +108,18 @@ class FileService:
                 or insights_data.get("suggested_task_type")
                 or "clustering"
             )
-
             suggested_target_column = (
                 llm_suggestions.get("suggested_target")
                 or llm_suggestions.get("suggested_target_column")
                 or insights_data.get("suggested_target_column")
                 or None
             )
-
             suggested_missing_strategy = (
                 llm_suggestions.get("missing_value_strategy")
                 or llm_suggestions.get("missing_strategy")
                 or insights_data.get("suggested_missing_strategy")
                 or "mean"
             )
-
             # Build merged result using the exact keys expected by UploadResponse/DatasetInsights
             merged: Dict[str, Any] = {
                 "summary": summary,
@@ -153,22 +134,18 @@ class FileService:
                 "heuristic_suggested_missing_strategy": insights_data.get("suggested_missing_strategy"),
                 "llm_suggestions": llm_suggestions
             }
-
             # If LLM gave feature_engineering list, append to insights
             if isinstance(llm_suggestions, dict):
                 fe = llm_suggestions.get("feature_engineering")
                 if isinstance(fe, list) and fe:
                     merged["insights"].append("LLM suggested feature engineering: " + ", ".join(fe))
-
             return merged
-
         except HTTPException:
             raise
         except Exception as e:
             logger.error(f"Error analyzing dataset: {str(e)}")
             # Keep error message readable for API clients
             raise HTTPException(status_code=500, detail=f"Failed to analyze dataset: {str(e)}")
-
     def _sanitize_filename(self, filename: str) -> str:
         """Sanitize filename to prevent path traversal"""
         import re, os

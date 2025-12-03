@@ -1,7 +1,6 @@
 # models/responses.py
 from pydantic import BaseModel
 from typing import Dict, List, Any, Optional
-
 class DatasetSummary(BaseModel):
     columns: List[str]
     rows: int
@@ -10,14 +9,12 @@ class DatasetSummary(BaseModel):
     unique_values: Dict[str, int]
     sample_rows: int
     file_size_mb: float
-
 class DatasetInsights(BaseModel):
     summary: DatasetSummary
     insights: List[str]
     suggested_task_type: str
     suggested_target_column: Optional[str]
     suggested_missing_strategy: str
-
 class ModelMetrics(BaseModel):
     task_type: str
     model_type: str
@@ -25,15 +22,12 @@ class ModelMetrics(BaseModel):
     feature_importance: Optional[List[List[Any]]] = None
     training_time: Optional[float] = None
     error: Optional[str] = None
-
 class UploadResponse(BaseModel):
     message: str
     files: Dict[str, DatasetInsights]
-
 class PreprocessResponse(BaseModel):
     message: str
     files: Dict[str, Dict[str, str]]
-
 class TrainResponse(BaseModel):
     message: str
     results: Dict[str, ModelMetrics]
