@@ -1,30 +1,135 @@
+version: '3.8'
+
 services:
+  # Redis - Message queue, state store, log streaming
   redis:
-    image: redis:7.2-alpine
-    container_name: redis_local
+    image: redis:7-alpine
+    container_name: llm-platform-redis
     ports:
       - "6379:6379"
     volumes:
-      - redis-data:/data
+      - redis_data:/data
+    command: redis-server --appendonly yes
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
-    restart: unless-stopped
-  web:
-    build: .
-    container_name: no_code_ml_api
+    networks:
+      - llm-platform
+
+  # PostgreSQL - Metadata and job persistence
+  postgres:
+    image: postgres:15-alpine
+    container_name: llm-platform-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-llm_platform}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme123}
+      POSTGRES_DB: ${POSTGRES_DB:-llm_platform}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U llm_platform"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - llm-platform
+
+  # MinIO - S3-compatible object storage
+  minio:
+    image: minio/minio:latest
+    container_name: llm-platform-minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - llm-platform
+
+  # FastAPI Application
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: llm-platform-api
+    environment:
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-llm_platform}:${POSTGRES_PASSWORD:-changeme123}@postgres:5432/${POSTGRES_DB:-llm_platform}
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+      - MINIO_SECURE=false
+      - GPU_ENABLED=false
+    ports:
+      - "8000:8000"
     depends_on:
       redis:
         condition: service_healthy
-    ports:
-      - "8000:8000"
-    env_file:
-      - .env
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     volumes:
-      - ./uploads:/app/uploads
-      - ./:/app
-    restart: unless-stopped
+      - ./app:/app/app
+      - ./uploads:/tmp
+    networks:
+      - llm-platform
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Background Worker (with GPU support)
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: llm-platform-worker
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-llm_platform}:${POSTGRES_PASSWORD:-changeme123}@postgres:5432/${POSTGRES_DB:-llm_platform}
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+      - MINIO_SECURE=false
+      - GPU_ENABLED=${GPU_ENABLED:-true}
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+    depends_on:
+      - redis
+      - postgres
+      - minio
+    volumes:
+      - ./app:/app/app
+      - ./models:/models
+      - ./checkpoints:/checkpoints
+    networks:
+      - llm-platform
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: rq worker --url redis://redis:6379/0 training evaluation orchestration default
+
+networks:
+  llm-platform:
+    driver: bridge
+
 volumes:
-  redis-data:
+  redis_data:
+  postgres_data:
+  minio_data:
