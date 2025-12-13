@@ -16,7 +16,7 @@ interface ModelResponse {
 
 export default function Compare() {
   const [baseModel, setBaseModel] = useState('Qwen/Qwen2-0.5B-Instruct')
-  const [finetuned Model, setFinetunedModel] = useState('')
+  const [finetunedModel, setFinetunedModel] = useState('')
   const [prompt, setPrompt] = useState('')
   const [baseResponse, setBaseResponse] = useState<ModelResponse | null>(null)
   const [finetunedResponse, setFinetunedResponse] = useState<ModelResponse | null>(null)
