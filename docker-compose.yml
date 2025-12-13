@@ -67,7 +67,30 @@ services:
       - ./uploads:/tmp
     networks:
       - llm-platform
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Frontend Application
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: llm-platform-frontend
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    networks:
+      - llm-platform
 
   # Background Worker (with GPU support)
   worker:
