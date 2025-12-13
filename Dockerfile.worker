@@ -43,8 +43,6 @@ RUN pip install --no-cache-dir \
     pydantic-settings==2.1.0 \
     redis==5.0.1 \
     rq==1.16.0 \
-    sqlalchemy==2.0.25 \
-    psycopg2-binary==2.9.9 \
     minio==7.2.3 \
     python-dotenv==1.0.0 \
     structlog==24.1.0 \

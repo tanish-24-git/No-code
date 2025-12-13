@@ -92,13 +92,15 @@ services:
       - ./checkpoints:/checkpoints
     networks:
       - llm-platform
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    # GPU support disabled for CPU-only systems
+    # Uncomment below if you have NVIDIA GPU available:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
     command: rq worker --url redis://redis:6379/0 training evaluation orchestration default
 
 networks:

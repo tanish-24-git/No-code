@@ -20,15 +20,15 @@ RUN pip install --no-cache-dir \
     pydantic-settings==2.1.0 \
     redis==5.0.1 \
     rq==1.16.0 \
-    sqlalchemy==2.0.25 \
-    psycopg2-binary==2.9.9 \
-    alembic==1.13.1 \
     minio==7.2.3 \
     python-dotenv==1.0.0 \
     structlog==24.1.0 \
     httpx==0.26.0 \
     tenacity==8.2.3 \
     pandas==2.1.4
+
+# Install CPU PyTorch separately
+RUN pip install --no-cache-dir torch==2.1.2 --index-url https://download.pytorch.org/whl/cpu
 
 # Copy application code
 COPY ./app /app/app
