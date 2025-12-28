@@ -1,11 +1,12 @@
 import { BrowserRouter, Routes, Route, Link } from 'react-router-dom';
 import { QueryClientProvider, QueryClient } from '@tanstack/react-query';
 import { Toaster } from 'react-hot-toast';
-import { FlaskConical, Folder, Sparkles, LayoutGrid } from 'lucide-react';
+import { FlaskConical, Folder, Sparkles, LayoutGrid, Plus } from 'lucide-react';
 import Playground from './pages/Playground';
 import Compare from './pages/Compare';
 import Projects from './pages/Projects';
 import AIChat from './pages/AIChat';
+import CreateJob from './pages/CreateJob';
 import './index.css';
 
 const queryClient = new QueryClient();
@@ -36,6 +37,10 @@ function App() {
                     <Folder className="w-4 h-4" />
                     Projects
                   </Link>
+                  <Link to="/create-job" className="flex items-center gap-2 px-4 py-2 rounded-xl bg-primary text-primary-foreground hover:opacity-90 transition-all text-sm font-medium glow-primary">
+                    <Plus className="w-4 h-4" />
+                    New Job
+                  </Link>
                   <Link to="/" className="flex items-center gap-2 px-4 py-2 rounded-xl hover:bg-secondary transition-all text-sm font-medium">
                     <LayoutGrid className="w-4 h-4" />
                     Playground
@@ -54,6 +59,7 @@ function App() {
             <Route path="/" element={<Playground />} />
             <Route path="/compare" element={<Compare />} />
             <Route path="/projects" element={<Projects />} />
+            <Route path="/create-job" element={<CreateJob />} />
             <Route path="/ai-chat" element={<AIChat />} />
           </Routes>
 

@@ -1,0 +1,21 @@
+FROM vllm/vllm-openai:latest
+
+# Install additional dependencies
+RUN pip install --no-cache-dir \
+    transformers==4.37.2 \
+    accelerate==0.26.1
+
+# Pre-download TinyLlama model during build to avoid runtime delays
+RUN python -c "from transformers import AutoTokenizer, AutoModelForCausalLM; \
+    AutoTokenizer.from_pretrained('TinyLlama/TinyLlama-1.1B-Chat-v1.0'); \
+    AutoModelForCausalLM.from_pretrained('TinyLlama/TinyLlama-1.1B-Chat-v1.0')"
+
+EXPOSE 8001
+
+# Start vLLM OpenAI-compatible server
+CMD ["vllm", "serve", "TinyLlama/TinyLlama-1.1B-Chat-v1.0", \
+     "--host", "0.0.0.0", \
+     "--port", "8001", \
+     "--dtype", "auto", \
+     "--max-model-len", "2048", \
+     "--trust-remote-code"]

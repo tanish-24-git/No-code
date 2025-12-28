@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: tinyllama-base
+  namespace: llm-platform
+  labels:
+    app: tinyllama-base
+spec:
+  ports:
+  - port: 8001
+    targetPort: 8001
+    protocol: TCP
+    name: http
+  selector:
+    app: tinyllama-base
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tinyllama-base
+  namespace: llm-platform
+spec:
+  replicas: 2  # HA for base model inference
+  selector:
+    matchLabels:
+      app: tinyllama-base
+  template:
+    metadata:
+      labels:
+        app: tinyllama-base
+    spec:
+      containers:
+      - name: vllm
+        image: llm-platform-tinyllama-base:latest
+        ports:
+        - containerPort: 8001
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2000m"
+            # Uncomment for GPU nodes:
+            # nvidia.com/gpu: 1
+          limits:
+            memory: "8Gi"
+            cpu: "4000m"
+            # nvidia.com/gpu: 1
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      # Uncomment for GPU scheduling:
+      # nodeSelector:
+      #   accelerator: nvidia-gpu
+      # tolerations:
+      # - key: nvidia.com/gpu
+      #   operator: Exists
+      #   effect: NoSchedule
