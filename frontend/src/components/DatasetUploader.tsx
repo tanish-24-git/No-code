@@ -4,6 +4,8 @@ import { useState } from 'react';
 import useSWR from 'swr';
 import { fetcher, uploadFile, api } from '@/lib/api';
 import type { Dataset } from '@/lib/types';
+import { Upload, Database, ChevronDown } from 'lucide-react';
+import { cn } from '@/lib/cn';
 
 type Props = {
   pipelineId: string | null;
@@ -33,31 +35,41 @@ export function DatasetUploader({ pipelineId, attachedId, onAttach }: Props) {
   };
 
   return (
-    <div className="px-4 py-3 border-b border-border bg-bg-2/40">
-      <div className="flex items-center gap-3">
-        <label className="btn cursor-pointer">
-          <input
-            type="file"
-            accept=".csv,.json,.jsonl"
-            className="hidden"
-            onChange={(e) => e.target.files && handleFile(e.target.files[0])}
-            disabled={uploading}
-          />
-          {uploading ? 'uploading…' : 'upload dataset'}
-        </label>
+    <div className="bg-black/80 backdrop-blur-xl border border-white/10 rounded-lg p-1 flex items-center gap-1 shadow-2xl">
+      <label className={cn(
+        "flex items-center gap-2 px-3 py-1.5 rounded cursor-pointer transition-all",
+        uploading ? "bg-white/5 opacity-50" : "hover:bg-white/5 active:bg-white/10"
+      )}>
+        <input
+          type="file"
+          accept=".csv,.json,.jsonl"
+          className="hidden"
+          onChange={(e) => e.target.files && handleFile(e.target.files[0])}
+          disabled={uploading}
+        />
+        <Upload className="w-3.5 h-3.5 text-white/60" />
+        <span className="text-[10px] font-black uppercase tracking-widest text-white/80">
+          {uploading ? 'Processing...' : 'Upload'}
+        </span>
+      </label>
+
+      <div className="w-px h-4 bg-white/10 mx-1" />
+
+      <div className="relative group">
+        <Database className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-white/30" />
         <select
-          className="bg-bg-3 border border-border rounded px-2 py-1 text-xs text-fg max-w-[260px]"
+          className="bg-transparent border-none pl-9 pr-8 py-1.5 text-[10px] font-black uppercase tracking-widest text-white/60 hover:text-white transition-all appearance-none cursor-pointer outline-none min-w-[180px]"
           value={attachedId ?? ''}
           onChange={(e) => onAttach(e.target.value)}
         >
-          <option value="">no dataset attached</option>
+          <option value="" className="bg-black text-white/40">Select Source</option>
           {list?.map((d) => (
-            <option key={d.id} value={d.id}>
-              {d.name} · {d.row_count} rows
+            <option key={d.id} value={d.id} className="bg-black text-white">
+              {d.name.toUpperCase()} ({d.row_count})
             </option>
           ))}
         </select>
-        <span className="text-[11px] text-fg-3">CSV · JSON · JSONL</span>
+        <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-white/20 pointer-events-none" />
       </div>
     </div>
   );
