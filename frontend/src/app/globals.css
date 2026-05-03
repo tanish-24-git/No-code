@@ -4,44 +4,76 @@
 
 @layer base {
   html, body {
-    @apply bg-bg text-fg font-mono min-h-screen;
+    @apply bg-bg text-fg font-sans min-h-screen selection:bg-white/10;
+    scroll-behavior: smooth;
   }
   body {
-    background:
-      linear-gradient(rgba(255,255,255,0.012) 1px, transparent 1px) 0 0 / 48px 48px,
-      linear-gradient(90deg, rgba(255,255,255,0.012) 1px, transparent 1px) 0 0 / 48px 48px,
-      #0a0a0a;
+    background-color: #000000;
+    background-image: 
+      linear-gradient(to right, rgba(255,255,255,0.03) 1px, transparent 1px);
+    background-size: calc(100% / 8) 100%;
   }
-  ::selection { background: rgba(74,222,128,0.25); }
 }
 
 @layer components {
+  .tech-label {
+    @apply text-[10px] uppercase tracking-[0.2em] font-medium text-fg-3 mb-2;
+  }
+  .scan-line {
+    @apply absolute inset-x-0 h-[2px] bg-gradient-to-r from-transparent via-white/20 to-transparent;
+    animation: scan 4s linear infinite;
+  }
   .btn {
-    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded border border-border-2 bg-bg-3 text-fg text-xs hover:bg-bg-2 transition-colors;
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg border border-border bg-bg-2 text-fg text-sm font-medium hover:bg-bg-3 hover:border-border-2 active:scale-[0.98] transition-all duration-200;
   }
   .btn-primary {
-    @apply bg-success/10 border-success/40 text-success hover:bg-success/15;
+    @apply bg-white text-black border-transparent hover:bg-fg-2 active:bg-fg-3;
   }
   .btn-danger {
-    @apply bg-danger/10 border-danger/40 text-danger hover:bg-danger/15;
+    @apply bg-danger/10 border-danger/40 text-danger hover:bg-danger/20;
   }
   .input, .select, .textarea {
-    @apply w-full bg-bg-2 border border-border rounded px-2 py-1.5 text-xs text-fg focus:border-border-2 focus:outline-none;
+    @apply w-full bg-bg-2 border border-border rounded-lg px-3 py-2 text-sm text-fg placeholder:text-fg-3 focus:border-fg-3 focus:ring-1 focus:ring-fg-3 focus:outline-none transition-all;
   }
   .label {
-    @apply text-[10px] uppercase tracking-wider text-fg-2;
+    @apply text-xs font-medium text-fg-2 mb-1.5 block;
   }
   .card {
-    @apply rounded border border-border bg-bg-2/60 p-4;
+    @apply rounded-xl border border-border bg-bg-2/50 backdrop-blur-sm p-5;
   }
   .pill {
-    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-border-2 bg-bg-3 text-[10px] text-fg-2;
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-border bg-bg-3 text-[11px] font-medium text-fg-2;
   }
-  .dot { @apply inline-block w-1.5 h-1.5 rounded-full; }
-  .dot-success { @apply bg-success shadow-[0_0_5px_#4ade80]; }
-  .dot-warn { @apply bg-warn shadow-[0_0_5px_#fbbf24]; }
-  .dot-danger { @apply bg-danger shadow-[0_0_5px_#f87171]; }
-  .dot-info { @apply bg-info shadow-[0_0_5px_#60a5fa]; }
+  .dot { @apply inline-block w-2 h-2 rounded-full; }
+  .dot-success { @apply bg-success shadow-[0_0_10px_rgba(16,185,129,0.4)]; }
+  .dot-warn { @apply bg-warn shadow-[0_0_10px_rgba(245,158,11,0.4)]; }
+  .dot-danger { @apply bg-danger shadow-[0_0_10px_rgba(239,68,68,0.4)]; }
+  .dot-info { @apply bg-info shadow-[0_0_10px_rgba(59,130,246,0.4)]; }
+}
+
+@keyframes scan {
+  0% { top: 0%; opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { top: 100%; opacity: 0; }
+}
+
+@keyframes scan-edge-v {
+  0% { top: -100%; }
+  100% { top: 100%; }
+}
+
+.animate-scan-edge-v {
+  animation: scan-edge-v 2s linear infinite;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.8s ease-out forwards;
 }
 
 /* React Flow theme overrides — make it match the dark monochrome canvas. */
@@ -55,3 +87,6 @@
 .react-flow__controls-button { background: transparent; color: #e8e8e8; border-bottom: 1px solid #1f1f1f; }
 .react-flow__controls-button:hover { background: #161616; }
 .react-flow__minimap { background: #0a0a0a; border: 1px solid #1f1f1f; }
+.react-flow__attribution {
+  display: none !important;
+}

@@ -1,35 +1,32 @@
 import type { Metadata } from 'next';
-import { DM_Mono, Syne } from 'next/font/google';
+import { Inter, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 import { Nav } from '@/components/Nav';
 import { ConfigBanner } from '@/components/ConfigBanner';
 
 
-// next/font self-hosts these at build time, so there is no runtime fetch and
-// no FOUT. The CSS variables are exposed to Tailwind via the body className.
-const dmMono = DM_Mono({
+// next/font self-hosts these at build time.
+const jetbrains = JetBrains_Mono({
   subsets: ['latin'],
-  weight: ['300', '400', '500'],
   variable: '--font-mono',
   display: 'swap',
 });
 
-const syne = Syne({
+const inter = Inter({
   subsets: ['latin'],
-  weight: ['400', '600', '700', '800'],
   variable: '--font-sans',
   display: 'swap',
 });
 
 export const metadata: Metadata = {
-  title: 'FineTune Studio',
-  description: 'Local-first, open-source LLM fine-tuning + inference copilot.',
+  title: 'No-code',
+  description: 'AI Agent Registry & Fine-Tuning Studio.',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${dmMono.variable} ${syne.variable}`}>
-      <body>
+    <html lang="en" className={`${jetbrains.variable} ${inter.variable} scroll-smooth`}>
+      <body className="antialiased">
         <Nav />
         <ConfigBanner />
         <main className="pt-[52px] min-h-screen">{children}</main>
