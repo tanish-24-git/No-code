@@ -24,39 +24,53 @@ export default function InferencePage() {
   const [showAdd, setShowAdd] = useState(false);
 
   return (
-    <div className="max-w-[1100px] mx-auto px-8 py-10 space-y-6">
-      <header className="flex items-center justify-between">
-        <div>
-          <h1 className="font-sans font-bold text-2xl">Inference endpoints</h1>
-          <p className="text-fg-2 text-sm mt-1">
-            Register the inference servers you actually run. The agent reads this list as a tool and
-            recommends generation metrics tuned to each one.
-          </p>
-        </div>
-        <button className="btn btn-primary" onClick={() => setShowAdd(true)}>
-          + add endpoint
-        </button>
-      </header>
+    <div className="pt-24 px-8 pb-12 min-h-screen bg-black">
+      <div className="max-w-[1400px] mx-auto space-y-12">
+        <header className="flex flex-col md:flex-row md:items-end justify-between gap-8">
+          <div className="space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="px-3 py-1 bg-white/5 border border-white/10 rounded flex items-center gap-2">
+                <span className="text-[10px] font-black tracking-[0.2em] uppercase text-white/40">Network</span>
+              </div>
+            </div>
+            <h1 className="text-5xl font-bold tracking-tight text-white uppercase">
+              Inference <br/> Endpoints
+            </h1>
+            <p className="text-white/40 text-lg max-w-xl font-light">
+              Register and monitor your generation infrastructure. Connect local Ollama instances or remote API providers.
+            </p>
+          </div>
+          <button 
+            className="flex items-center gap-3 px-6 py-3 bg-white text-black rounded hover:bg-white/90 transition-all font-bold"
+            onClick={() => setShowAdd(true)}
+          >
+            <span className="text-[10px] uppercase font-black tracking-[0.2em]">Add Endpoint</span>
+          </button>
+        </header>
 
-      {showAdd && <AddForm onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); mutate(); }} />}
+        {showAdd && <AddForm onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); mutate(); }} />}
 
-      {!list ? (
-        <div className="text-fg-2">loading…</div>
-      ) : list.length === 0 ? (
-        <div className="card text-fg-2 text-sm">No endpoints yet. Click <em>+ add endpoint</em> to register your first.</div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {list.map((it) => (
-            <InferenceCard key={it.id} item={it} onChanged={mutate} />
-          ))}
-        </div>
-      )}
+        {!list ? (
+          <div className="text-white/20 uppercase text-[10px] tracking-widest font-black">Scanning network…</div>
+        ) : list.length === 0 ? (
+          <div className="p-12 border border-white/5 rounded-xl bg-white/[0.01] text-center">
+            <p className="text-white/20 text-sm font-medium uppercase tracking-widest">No endpoints registered.</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {list.map((it) => (
+              <InferenceCard key={it.id} item={it} onChanged={mutate} />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
 function InferenceCard({ item, onChanged }: { item: Inference; onChanged: () => void }) {
   const [probing, setProbing] = useState(false);
+  
   const probe = async () => {
     setProbing(true);
     try {
@@ -66,6 +80,7 @@ function InferenceCard({ item, onChanged }: { item: Inference; onChanged: () => 
       setProbing(false);
     }
   };
+
   const remove = async () => {
     if (!confirm(`Delete endpoint "${item.name}"?`)) return;
     await api(`/api/inferences/${item.id}`, { method: 'DELETE' });
@@ -73,49 +88,61 @@ function InferenceCard({ item, onChanged }: { item: Inference; onChanged: () => 
   };
 
   const reach = item.last_probe;
-  const reachDot = !reach ? 'dot-warn' : reach.reachable ? 'dot-success' : 'dot-danger';
+  const reachColor = !reach ? "text-white/20" : reach.reachable ? "text-white" : "text-white/10";
   const metrics = Object.entries(item.suggested_metrics ?? {});
 
   return (
-    <div className="card space-y-3">
-      <div className="flex items-start justify-between gap-3">
+    <div className="group p-6 bg-white/[0.02] border border-white/5 rounded-xl hover:bg-white/[0.04] hover:border-white/20 transition-all duration-500">
+      <div className="flex items-start justify-between mb-8">
         <div>
-          <div className="text-sm font-medium">{item.name}</div>
-          <div className="text-[11px] text-fg-2">{KIND_LABELS[item.kind]} · {item.base_url}</div>
+          <h3 className="text-lg font-bold text-white mb-1">{item.name}</h3>
+          <div className="text-[9px] text-white/30 font-black uppercase tracking-widest">
+            {KIND_LABELS[item.kind]} · {item.base_url}
+          </div>
         </div>
-        <span className="pill">
-          <span className={`dot ${reachDot}`} />
-          {!reach ? 'unprobed' : reach.reachable ? `${Math.round(reach.latency_ms ?? 0)}ms` : 'unreachable'}
-        </span>
+        <div className={cn(
+          "px-3 py-1 rounded text-[9px] font-black uppercase tracking-widest border border-white/10",
+          reachColor
+        )}>
+          {!reach ? 'unprobed' : reach.reachable ? `${Math.round(reach.latency_ms ?? 0)}ms` : 'offline'}
+        </div>
       </div>
 
       {item.default_model && (
-        <div className="text-[11px] text-fg-2">default · {item.default_model}</div>
+        <div className="mb-6">
+          <p className="text-[9px] text-white/20 uppercase tracking-widest font-black mb-1">Default Model</p>
+          <p className="text-xs text-white/60 font-bold">{item.default_model}</p>
+        </div>
       )}
 
-      {reach?.models?.length ? (
-        <div className="text-[11px] text-fg-2">
-          models · {reach.models.slice(0, 6).join(', ')}{reach.models.length > 6 ? ` +${reach.models.length - 6}` : ''}
-        </div>
-      ) : null}
-
       {metrics.length > 0 && (
-        <div className="border-t border-border pt-3">
-          <div className="label mb-2">agent-suggested metrics</div>
-          <div className="grid grid-cols-2 gap-2 text-[11px]">
+        <div className="space-y-3 mb-8">
+          <p className="text-[9px] text-white/20 uppercase tracking-widest font-black">Optimization Parameters</p>
+          <div className="grid grid-cols-2 gap-2">
             {metrics.map(([k, v]) => (
-              <div key={k} className="flex justify-between gap-2 bg-bg-3 px-2 py-1 rounded">
-                <span className="text-fg-2">{k}</span>
-                <span className="text-fg">{String(v)}</span>
+              <div key={k} className="flex justify-between items-center bg-white/5 px-2 py-1.5 rounded border border-white/5">
+                <span className="text-[9px] text-white/30 uppercase tracking-tight font-bold">{k}</span>
+                <span className="text-[10px] text-white font-mono">{String(v)}</span>
               </div>
             ))}
           </div>
         </div>
       )}
 
-      <div className="flex gap-2 pt-1">
-        <button className="btn" onClick={probe} disabled={probing}>{probing ? 'probing…' : 'probe'}</button>
-        <button className="btn btn-danger ml-auto" onClick={remove}>delete</button>
+      <div className="flex gap-3 pt-6 border-t border-white/5">
+        <button 
+          className="flex-1 px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded text-[9px] font-black uppercase tracking-widest text-white transition-all"
+          onClick={probe} 
+          disabled={probing}
+        >
+          {probing ? 'probing…' : 'probe network'}
+        </button>
+        <button 
+          className="px-4 py-2 hover:bg-white/5 text-white/20 hover:text-white transition-all rounded"
+          onClick={remove}
+        >
+          <span className="text-[9px] font-black uppercase tracking-widest">Delete</span>
+        </button>
       </div>
     </div>
   );
