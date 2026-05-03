@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(py -3.14 _smoke.py)",
+      "Bash(py -3.14 -m pip install openai)",
+      "Bash(where node *)",
+      "Bash(npm --version)",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(rm -rf .next)",
+      "Bash(NEXT_BUILD_NO_STANDALONE=1 npm run build)"
+    ]
+  }
+}

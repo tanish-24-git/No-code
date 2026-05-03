@@ -1,184 +1,65 @@
-version: '3.8'
+# FineTune Studio - one-command local stack.
+#
+#   docker compose up --build
+#
+# Backend listens on http://localhost:8000 (Swagger at /docs).
+# Frontend listens on http://localhost:3000.
+#
+# All persistent state lives in named volumes; if you want to inspect it on
+# the host instead, change `data:` etc. to bind mounts (see commented lines).
 
 services:
-  # Redis - Message queue, state store, log streaming
-  redis:
-    image: redis:7-alpine
-    container_name: llm-platform-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    command: redis-server --appendonly yes
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - llm-platform
-
-
-  # MinIO - S3-compatible object storage
-  minio:
-    image: minio/minio:latest
-    container_name: llm-platform-minio
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - minio_data:/data
-    command: server /data --console-address ":9001"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 30s
-      timeout: 20s
-      retries: 3
-    networks:
-      - llm-platform
-
-  # FastAPI Application
-  api:
+  backend:
     build:
-      context: .
-      dockerfile: Dockerfile.api
-    container_name: llm-platform-api
+      context: ./backend
+      dockerfile: Dockerfile
+    image: finetune-studio-backend:latest
+    container_name: finetune-backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
     environment:
-      - API_HOST=0.0.0.0
-      - API_PORT=8000
-      - REDIS_URL=redis://redis:6379/0
-      - MINIO_ENDPOINT=minio:9000
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
-      - MINIO_SECURE=false
-      - GPU_ENABLED=false
+      # Override paths so they match the named volumes mounted below.
+      DATA_DIR: /app/data
+      UPLOAD_DIR: /app/uploads
+      MODELS_DIR: /app/models
+      # The frontend container reaches the backend at http://backend:8000;
+      # CORS only matters for the browser, which still talks to localhost:3000.
+      CORS_ORIGINS_RAW: "http://localhost:3000,http://127.0.0.1:3000"
     ports:
       - "8000:8000"
-    depends_on:
-      redis:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
     volumes:
-      - ./app:/app/app
-      - ./uploads:/tmp
-    networks:
-      - llm-platform
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      - backend_data:/app/data
+      - backend_uploads:/app/uploads
+      - backend_models:/app/models
+      # - ./backend/data:/app/data       # bind mount alternative
+      # - ./backend/uploads:/app/uploads
+      # - ./backend/models:/app/models
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
-  # Frontend Application
   frontend:
     build:
       context: ./frontend
-      dockerfile: Dockerfile.dev
-    container_name: llm-platform-frontend
+      dockerfile: Dockerfile
+    image: finetune-studio-frontend:latest
+    container_name: finetune-frontend
+    restart: unless-stopped
     environment:
-      - VITE_API_URL=http://localhost:8000
+      # Server-only, used by next.config.mjs at startup.
+      BACKEND_URL: http://backend:8000
+      NODE_ENV: production
     ports:
       - "3000:3000"
     depends_on:
-      - api
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-    networks:
-      - llm-platform
-
-  # TinyLlama Base Model Inference (Container #4) - vLLM Server
-  tinyllama-base:
-    build:
-      context: ./docker
-      dockerfile: Dockerfile.tinyllama-base
-    container_name: llm-platform-tinyllama-base
-    ports:
-      - "8001:8001"
-    # CPU mode by default, uncomment for GPU:
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    networks:
-      - llm-platform
-
-  # Ollama AI Assistant (TinyLlama) - CPU/GPU compatible
-  ollama:
-    build:
-      context: ./docker
-      dockerfile: Dockerfile.ollama
-    container_name: llm-platform-ollama
-    ports:
-      - "11434:11434"
-    # GPU support commented out for CPU compatibility
-    # Uncomment below if you have NVIDIA GPU:
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    networks:
-      - llm-platform
-
-  # Background Worker (with GPU support)
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.worker
-    container_name: llm-platform-worker
-    environment:
-      - REDIS_URL=redis://redis:6379/0
-      - MINIO_ENDPOINT=minio:9000
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
-      - MINIO_SECURE=false
-      - GPU_ENABLED=${GPU_ENABLED:-true}
-      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
-    depends_on:
-      - redis
-      - minio
-    volumes:
-      - ./app:/app/app
-      - ./models:/models
-      - ./checkpoints:/checkpoints
-    networks:
-      - llm-platform
-    # GPU support disabled for CPU-only systems
-    # Uncomment below if you have NVIDIA GPU available:
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
-    command: rq worker --url redis://redis:6379/0 training evaluation orchestration default
-
-networks:
-  llm-platform:
-    driver: bridge
+      backend:
+        condition: service_healthy
 
 volumes:
-  redis_data:
-  minio_data:
+  backend_data:
+  backend_uploads:
+  backend_models:

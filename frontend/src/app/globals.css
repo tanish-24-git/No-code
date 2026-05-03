@@ -1,0 +1,57 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body {
+    @apply bg-bg text-fg font-mono min-h-screen;
+  }
+  body {
+    background:
+      linear-gradient(rgba(255,255,255,0.012) 1px, transparent 1px) 0 0 / 48px 48px,
+      linear-gradient(90deg, rgba(255,255,255,0.012) 1px, transparent 1px) 0 0 / 48px 48px,
+      #0a0a0a;
+  }
+  ::selection { background: rgba(74,222,128,0.25); }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded border border-border-2 bg-bg-3 text-fg text-xs hover:bg-bg-2 transition-colors;
+  }
+  .btn-primary {
+    @apply bg-success/10 border-success/40 text-success hover:bg-success/15;
+  }
+  .btn-danger {
+    @apply bg-danger/10 border-danger/40 text-danger hover:bg-danger/15;
+  }
+  .input, .select, .textarea {
+    @apply w-full bg-bg-2 border border-border rounded px-2 py-1.5 text-xs text-fg focus:border-border-2 focus:outline-none;
+  }
+  .label {
+    @apply text-[10px] uppercase tracking-wider text-fg-2;
+  }
+  .card {
+    @apply rounded border border-border bg-bg-2/60 p-4;
+  }
+  .pill {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-border-2 bg-bg-3 text-[10px] text-fg-2;
+  }
+  .dot { @apply inline-block w-1.5 h-1.5 rounded-full; }
+  .dot-success { @apply bg-success shadow-[0_0_5px_#4ade80]; }
+  .dot-warn { @apply bg-warn shadow-[0_0_5px_#fbbf24]; }
+  .dot-danger { @apply bg-danger shadow-[0_0_5px_#f87171]; }
+  .dot-info { @apply bg-info shadow-[0_0_5px_#60a5fa]; }
+}
+
+/* React Flow theme overrides — make it match the dark monochrome canvas. */
+.react-flow__node { font-family: inherit; }
+.react-flow__edge-path { stroke: #2a2a2a; stroke-width: 1.5; }
+.react-flow__edge.selected .react-flow__edge-path { stroke: #4ade80; }
+.react-flow__handle { background: #1f1f1f; border: 1px solid #2a2a2a; width: 8px; height: 8px; }
+.react-flow__handle.connectable-end { background: #60a5fa; }
+.react-flow__background { background: transparent; }
+.react-flow__controls { background: #111; border: 1px solid #1f1f1f; }
+.react-flow__controls-button { background: transparent; color: #e8e8e8; border-bottom: 1px solid #1f1f1f; }
+.react-flow__controls-button:hover { background: #161616; }
+.react-flow__minimap { background: #0a0a0a; border: 1px solid #1f1f1f; }

@@ -1,160 +1,95 @@
-# 🚀 LLM Fine-Tuning Platform
+# FineTune Studio
 
-> **Enterprise-Grade | AI-Assisted | Multi-Container | Production-Ready**
+A local-first, open-source platform for LLM fine-tuning and inference
+tuning, with a node-based pipeline editor and an LLM-powered agent that
+can read your hardware, your datasets, and your inference endpoints, then
+recommend exact configurations.
 
-<div align="center">
-
-[![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org)
-[![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
-[![Kubernetes](https://img.shields.io/badge/Kubernetes-326CE5?style=for-the-badge&logo=kubernetes&logoColor=white)](https://kubernetes.io/)
-[![Redis](https://img.shields.io/badge/Redis-DC382D?style=for-the-badge&logo=redis&logoColor=white)](https://redis.io)
-[![MinIO](https://img.shields.io/badge/MinIO-C72E49?style=for-the-badge&logo=minio&logoColor=white)](https://min.io)
-[![React](https://img.shields.io/badge/React-20232A?style=for-the-badge&logo=react&logoColor=61DAFB)](https://reactjs.org)
-
-</div>
-
-<br />
-
-An industrial-scale platform for fine-tuning Large Language Models. Features **real-time AI assistance**, autonomous agent orchestration, and distinct container isolation for CPU/GPU workloads. Designed for scale, observability, and zero-code operation.
-
----
-
-## ⚡ Workflow Architecture
-
-```mermaid
-graph LR
-    subgraph "Frontend Layer"
-        UI[💻 NoCode UI]
-        CLI[📟 CLI Tool]
-    end
-
-    subgraph "Orchestration Layer"
-        API[⚡ API Gateway]
-        ORCH[🎼 Agent Orchestrator]
-        AI[🧠 AI Assistant]
-    end
-
-    subgraph "Compute Layer (GPU)"
-        TRAIN[🔥 Training Agent]
-        EVAL[⚖️ Evaluation Agent]
-        EXPORT[📦 Export Agent]
-    end
-
-    subgraph "Storage Layer"
-        REDIS[(Redis Streams)]
-        MINIO[(MinIO Object Store)]
-    end
-
-    UI --> API
-    API --> ORCH
-    ORCH <--> AI
-    ORCH --> TRAIN
-    TRAIN --> REDIS
-    TRAIN --> MINIO
-    TRAIN --> EVAL
-    EVAL --> EXPORT
-    
-    style UI fill:#1E293B,stroke:#334155,color:#fff
-    style API fill:#0F172A,stroke:#3B82F6,color:#fff,stroke-width:2px
-    style TRAIN fill:#4C1D95,stroke:#8B5CF6,color:#fff,stroke-width:2px
-    style AI fill:#059669,stroke:#10B981,color:#fff
-    style REDIS fill:#991B1B,stroke:#EF4444,color:#fff
-```
-
-## ✨ Core Features
-
-### 🧠 Intelligent Orchestration
-- **Autonomous Agents**: Dedicated agents for dataset ingestion, validation, preprocessing, training, evaluation, and export.
-- **AI Copilot**: Integrated TinyLlama assistant suggests optimal hyperparameters (epochs, batch size, LoRA rank) based on your specific dataset.
-- **DAG Execution**: Complex dependency graphs managed automatically.
-
-### 🔥 Advanced Training Engine
-- **Multi-Method Support**: Full Fine-Tuning, LoRA (Low-Rank Adaptation), and QLoRA (4-bit Quantization).
-- **Hardware Agnostic**: Seamlessly switches between CPU and NVIDIA GPU modes.
-- **Real-Time Observability**: Live loss curves and metrics streamed via Server-Sent Events (SSE).
-
-### 🛡️ Enterprise Infrastructure
-- **Container Isolation**: Dedicated microservices for API, Workers, Inference, and Storage.
-- **Kubernetes Ready**: Full suite of production manifests (StatefulSets, HPA, ConfigMaps).
-- **Secure by Design**: Role-based access, JWT auth, and isolated compute environments.
-
----
-
-## 🚀 Quick Start
-
-### 1. Initialize System
-```bash
-# Clone and setup environment
-git clone <repo-url>
-cd NoCode-Back
-cp .env.example .env
-
-# Launch the platform (Starts 7 services)
-docker-compose up -d
-```
-
-### 2. Verify Deployment
-```bash
-# Check service health
-curl http://localhost:8000/health
-
-# Access Interfaces
-# 🖥️ Frontend: http://localhost:3000
-# 📄 API Docs: http://localhost:8000/docs
-# 🗄️ MinIO:    http://localhost:9001 (admin/minioadmin)
-```
-
----
-
-## 📦 System Components
-
-| Service | Port | Description |
-|---------|------|-------------|
-| **Frontend** | `3000` | Modern React/Vite Dashboard |
-| **API Gateway** | `8000` | FastAPI Orchestration Layer |
-| **GPU Worker** | `N/A` | Background Training Consumers |
-| **TinyLlama** | `8001` | Base Model Inference Engine |
-| **AI Assistant** | `8002` | Ollama-based Helper |
-| **Redis** | `6379` | Message Broker & Cache |
-| **MinIO** | `9000` | S3-Compatible Storage |
-
-## 📁 Agent Directory
+No Redis. No database. No Docker. No telemetry.
 
 ```
-app/agents/
-├── base_agent.py          # Abstract logic
-├── orchestrator.py        # Graph execution
-├── dataset_agent.py       # Ingestion & Validation
-├── preprocessing_agent.py # Tokenization & Chunking
-├── training_agent.py      # PyTorch/LoRA Trainer
-├── evaluation_agent.py    # F1/ROUGE Metrics
-└── export_agent.py        # Safetensors/GGUF Conversion
+backend/    FastAPI, Python 3.11+, file-based JSON store, BackgroundTasks
+frontend/   Next.js 14 App Router, TypeScript, Tailwind, React Flow
+docs/       Detailed documentation (you are here)
+data/       JSON state created on first run (settings, pipelines, jobs, ...)
+uploads/    Raw dataset files
+models/     Pulled base models and trained outputs
 ```
 
----
+## Highlights
 
-## 🛠️ Development
+- **Node-based pipelines.** Drag-and-drop dataset, preprocess, train,
+  evaluate, and export nodes. Wire them however you like.
+- **Bring your own inference.** Register Ollama, OpenAI-compatible servers
+  (vLLM, LM Studio, OpenRouter, Together, Groq), Hugging Face Inference,
+  or Anthropic endpoints. The agent reads them as tools.
+- **Bring your own LLM provider.** 17 providers supported out of the box:
+  Anthropic, OpenAI, Google Gemini, Groq, xAI Grok, DeepSeek, Mistral,
+  Together AI, Fireworks AI, OpenRouter, Perplexity, Cohere, Hugging
+  Face Router, Ollama, LM Studio, vLLM, and a `custom` escape hatch.
+  Pick one in the setup wizard, paste a key, done. The provider list is
+  driven from a single Python file - adding a new one is a one-entry
+  change.
+- **First-run setup wizard.** Boot the project, open the UI, and a guided
+  three-step flow takes you from "no config" to "agent verified".
+- **Encrypted at rest.** API keys are Fernet-encrypted; the symmetric
+  key auto-generates on first run.
+- **Streamed everything.** Job logs and agent chat both arrive over SSE.
 
-### Local Setup (No Docker)
-```bash
-# Install dependencies
-pip install -r requirements.txt
+## Documentation
 
-# Start dependencies
-redis-server &
-minio server /data &
+| Topic | File |
+| --- | --- |
+| Quick start | [docs/QUICKSTART.md](docs/QUICKSTART.md) |
+| Run with Docker | [docs/DOCKER.md](docs/DOCKER.md) |
+| All configuration variables | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
+| Architecture and request flow | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| HTTP API reference | [docs/API.md](docs/API.md) |
+| Agent, tools, and providers | [docs/AGENTS.md](docs/AGENTS.md) |
+| Inference endpoints | [docs/INFERENCE.md](docs/INFERENCE.md) |
+| Pipelines and jobs | [docs/PIPELINES.md](docs/PIPELINES.md) |
+| Troubleshooting | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
 
-# Run API
-python -m app.main
+## Five-minute tour
+
+### Option A: Docker (one command)
+
+```
+cp backend/.env.example backend/.env
+# (optional) edit backend/.env and paste your LLM_API_KEY
+docker compose up --build
 ```
 
-### Testing
-```bash
-# Run full suite
-pytest tests/ -v
+Frontend at `http://localhost:3000`, backend at `http://localhost:8000`.
+Full Docker notes in [docs/DOCKER.md](docs/DOCKER.md).
 
-# Generate coverage
-pytest --cov=app
-```
+### Option B: Local Python + Node
+
+1. Install Python 3.11+ and Node 18+.
+2. Start the backend:
+   ```
+   cd backend
+   python -m venv .venv
+   .venv\Scripts\Activate.ps1
+   pip install -r requirements.txt
+   cp .env.example .env
+   python -m uvicorn app.main:app --reload
+   ```
+3. Start the frontend in another terminal:
+   ```
+   cd frontend
+   npm install
+   npm run dev
+   ```
+
+### Either way
+
+4. Open `http://localhost:3000`. If you have not configured an LLM, the
+   warning banner routes you to `/setup`. Walk through the three steps
+   (provider, model, API key), and the agent is ready.
+5. Open the playground, drop a CSV, and ask the agent in the side panel:
+   `"look at my hardware and configure this pipeline"`.
+
+## License
+
+Open source. Choose MIT or Apache 2.0 to taste before publishing.
