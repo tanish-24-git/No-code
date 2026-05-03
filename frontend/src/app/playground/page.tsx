@@ -75,7 +75,7 @@ export default function PlaygroundPage() {
       />
 
       {pipeline ? (
-        <DatasetUploader pipelineId={pipeline.id} attachedId={pipeline.config.dataset_id} onAttach={attachDataset} />
+        <DatasetUploader pipelineId={pipeline.id} attachedId={pipeline.config.dataset_id ?? null} onAttach={attachDataset} />
       ) : null}
 
       <div className="flex-1 grid grid-cols-[1fr_320px_360px] min-h-0">

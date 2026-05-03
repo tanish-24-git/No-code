@@ -22,20 +22,17 @@ export function Nav() {
   const label = error
     ? 'backend offline'
     : data
-    ? data.hardware.device === 'cuda'
-      ? `local · cuda · ${data.hardware.gpu_name ?? 'gpu'}`
-      : data.hardware.device === 'mps'
-      ? 'local · mps'
-      : 'local · cpu'
+    ? data.hardware?.device === 'cuda'
+      ? `cuda · ${data.hardware?.gpu_name ?? 'gpu'}`
+      : data.hardware?.device === 'mps'
+      ? 'mps'
+      : 'cpu'
     : 'connecting…';
 
   return (
-    <nav className="fixed top-0 inset-x-0 h-[52px] bg-bg/90 border-b border-border backdrop-blur z-50 flex items-center px-7">
-      <Link href="/" className="font-sans font-extrabold text-[15px] tracking-tight flex items-center gap-2">
-        <span className={cn('dot animate-pulse', error ? 'dot-danger' : 'dot-success')} />
-        FineTune Studio
-      </Link>
-      <div className="ml-auto flex items-center gap-0.5">
+    <nav className="fixed top-6 inset-x-8 z-50 flex items-center justify-center pointer-events-none">
+      {/* Center Nav */}
+      <div className="flex items-center gap-1 p-1 bg-white/5 border border-white/10 rounded-lg backdrop-blur-md pointer-events-auto">
         {links.map((l) => {
           const active = pathname === l.href || (l.href !== '/' && pathname.startsWith(l.href));
           return (
@@ -43,10 +40,10 @@ export function Nav() {
               key={l.href}
               href={l.href}
               className={cn(
-                'px-3.5 py-1.5 rounded text-[12px] tracking-wider border transition-colors',
+                'px-4 py-1 rounded text-[10px] uppercase tracking-widest transition-all',
                 active
-                  ? 'text-fg bg-bg-3 border-border-2'
-                  : 'text-fg-2 hover:text-fg hover:bg-bg-3 hover:border-border border-transparent',
+                  ? 'bg-white text-black font-bold'
+                  : 'text-fg-3 hover:text-fg hover:bg-white/5',
               )}
             >
               {l.label}
@@ -54,9 +51,13 @@ export function Nav() {
           );
         })}
       </div>
-      <div className="ml-5 pl-5 border-l border-border flex items-center gap-2 text-[11px] text-fg-3">
-        <span className={cn('dot', dot)} />
-        <span>{label}</span>
+
+      {/* Right Status (Floating absolute to keep nav centered) */}
+      <div className="absolute right-0 flex items-center gap-4 pointer-events-auto">
+        <div className="flex items-center gap-2 px-3 py-1 bg-white/5 border border-white/10 rounded text-[10px] uppercase tracking-widest text-fg-2">
+          <span className={cn('w-1.5 h-1.5 rounded-full bg-white', dot)} />
+          <span>{label}</span>
+        </div>
       </div>
     </nav>
   );
