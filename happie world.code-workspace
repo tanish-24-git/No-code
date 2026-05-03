@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"name": "happie web",
+			"path": "../../.."
+		},
+		{
+			"name": "Happie",
+			"path": "../../../../Happie"
+		},
+		{
+			"name": "No-code",
+			"path": "../../../../No-code"
+		}
+	],
+	"settings": {}
+}
