@@ -19,8 +19,7 @@ export default function HomePage() {
             </div>
           </div>
           <h1 className="text-6xl md:text-9xl font-bold tracking-tight mb-10 leading-[1.0] text-white">
-            Fine-tuning <br/>
-            <span className="text-transparent bg-clip-text bg-gradient-to-b from-white to-white/20 italic">simplified.</span>
+            Fine-tuning Studio.
           </h1>
           <p className="text-white/40 text-xl max-w-2xl leading-relaxed font-light">
             The ultimate no-code studio for specialized intelligence. 

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useCallback } from 'react';
+import React, { useMemo, useCallback, useState, useEffect, useRef } from 'react';
 import ReactFlow, { 
   Background, 
   Controls, 
@@ -11,56 +11,88 @@ import ReactFlow, {
   useNodesState,
   useEdgesState,
   addEdge,
-  Connection
+  Connection,
+  MarkerType,
+  ReactFlowProvider,
+  useReactFlow
 } from 'reactflow';
 import 'reactflow/dist/style.css';
-import { Database, Wand2, Cpu, BarChart3, Plus, Play, MoreHorizontal } from 'lucide-react';
+import { Database, Wand2, Cpu, BarChart3, Plus, MoreHorizontal, CheckCircle2, X } from 'lucide-react';
 import { cn } from '@/lib/cn';
 
 const initialNodes: Node[] = [
   {
     id: '1',
     type: 'custom',
-    data: { label: 'Dataset', icon: <Database className="w-5 h-5" />, desc: 'Raw source data' },
-    position: { x: 50, y: 150 },
+    data: { label: 'Dataset', icon: <Database />, desc: 'Raw source data' },
+    position: { x: 0, y: 220 },
   },
   {
     id: '2',
     type: 'custom',
-    data: { label: 'Preprocess', icon: <Wand2 className="w-5 h-5" />, desc: 'Token optimization' },
-    position: { x: 300, y: 150 },
+    data: { label: 'Preprocess', icon: <Wand2 />, desc: 'Token optimization' },
+    position: { x: 300, y: 220 },
   },
   {
     id: '3',
     type: 'custom',
-    data: { label: 'Fine-tune', icon: <Cpu className="w-5 h-5" />, desc: 'Weight adjustment' },
-    position: { x: 550, y: 150 },
+    data: { label: 'Fine-tune', icon: <Cpu />, desc: 'Weight adjustment' },
+    position: { x: 600, y: 220 },
   },
 ];
 
-// Start with no connections
 const initialEdges: Edge[] = [];
 
 function CustomNode({ data }: { data: any }) {
+  if (data.isHidden) return null;
   return (
-    <div className="group relative">
-      <div className="absolute inset-0 bg-white/[0.02] blur-xl rounded-xl opacity-0 group-hover:opacity-100 transition-opacity" />
-      <div className="relative px-6 py-5 bg-[#121212] border border-white/20 rounded-lg min-w-[200px] hover:border-white/40 transition-all duration-500 select-none cursor-grab active:cursor-grabbing shadow-2xl">
+    <div className={cn(
+      "group relative animate-pop",
+      (data.isSuccess || data.isActive) && "z-10"
+    )}>
+      {/* Background Glow */}
+      <div className={cn(
+        "absolute inset-[-1px] blur-2xl rounded-xl opacity-0 transition-all duration-700",
+        data.isSuccess ? "bg-white/20 opacity-100" : (data.isActive ? "bg-white/10 opacity-50" : "bg-white/[0.01] group-hover:opacity-100")
+      )} />
+      
+      <div className={cn(
+        "relative px-6 py-4 bg-[#0a0a0a] border-2 rounded-xl min-w-[200px] transition-all duration-700 select-none",
+        data.isSuccess ? "border-white shadow-[0_0_40px_rgba(255,255,255,0.25)] scale-[1.05]" : 
+        (data.isActive ? "border-white/50 shadow-[0_0_20px_rgba(255,255,255,0.1)]" : "border-white/10 hover:border-white/30")
+      )}>
+        {/* Shine Overlay */}
+        {(data.isSuccess || data.isActive) && (
+          <div className="absolute inset-0 rounded-xl overflow-hidden pointer-events-none">
+            <div className="absolute inset-0 bg-gradient-to-tr from-transparent via-white/[0.05] to-transparent animate-pulse" />
+          </div>
+        )}
+
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-3">
-            <div className="text-white opacity-80 group-hover:opacity-100 transition-opacity">
-              {data.icon}
+            <div className={cn(
+              "transition-all duration-500",
+              data.isSuccess ? "text-white drop-shadow-[0_0_8px_white]" : 
+              (data.isActive ? "text-white opacity-100" : "text-white opacity-60 group-hover:opacity-100")
+            )}>
+              {React.cloneElement(data.icon as React.ReactElement, { className: "w-5 h-5" })}
             </div>
-            <span className="text-[10px] font-black uppercase tracking-[0.3em] text-white/90">
-              {data.label}
-            </span>
+            <div className="flex flex-col">
+              <span className="text-[11px] font-black uppercase tracking-[0.25em] text-white/90">
+                {data.label}
+              </span>
+              {data.isSuccess && (
+                <span className="text-[8px] text-white/80 font-bold uppercase tracking-widest mt-1 animate-pulse">
+                  System Active
+                </span>
+              )}
+            </div>
           </div>
-          <MoreHorizontal className="w-3 h-3 text-white/20" />
         </div>
         
-        <div className="h-px w-full bg-white/5 mb-4" />
+        <div className="h-[1px] w-full bg-white/5 mb-4" />
         
-        <p className="text-[9px] text-fg-3 leading-relaxed font-medium uppercase tracking-wider">
+        <p className="text-[9px] text-white/30 leading-relaxed font-medium uppercase tracking-wider">
           {data.desc}
         </p>
         
@@ -71,58 +103,154 @@ function CustomNode({ data }: { data: any }) {
   );
 }
 
-export default function HeroFlow() {
+function FlowContent() {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
+  const [isDemoRunning, setIsDemoRunning] = useState(false);
+  const [showNotification, setShowNotification] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const hasStartedRef = useRef(false);
+  const { fitView } = useReactFlow();
 
   const onConnect = useCallback(
-    (params: Connection) => setEdges((eds) => addEdge({ ...params, animated: false, style: { stroke: '#fff', strokeWidth: 1.5, opacity: 0.5 } }, eds)),
+    (params: Connection) => setEdges((eds) => addEdge({ 
+      ...params, 
+      animated: true, 
+      style: { stroke: '#fff', strokeWidth: 2, opacity: 0.9, filter: 'drop-shadow(0 0 4px white)' },
+      markerEnd: { type: MarkerType.ArrowClosed, color: '#fff' }
+    }, eds)),
     [setEdges]
   );
 
   const nodeTypes = useMemo(() => ({ custom: CustomNode }), []);
 
-  const addNode = (type: string) => {
-    const id = (nodes.length + 1).toString();
-    const newNode: Node = {
-      id,
-      type: 'custom',
-      data: { 
-        label: type, 
-        icon: type === 'Model' ? <Cpu className="w-5 h-5" /> : <BarChart3 className="w-5 h-5" />,
-        desc: 'Pipeline module' 
+  const runDemo = useCallback(async () => {
+    if (isDemoRunning) return;
+    
+    setIsDemoRunning(true);
+    setShowNotification(false);
+    setNodes([]);
+    setEdges([]);
+
+    const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+    const demoNodesData = [
+      { id: '1', label: 'Dataset', icon: <Database />, desc: 'Raw source data', x: 0, y: 220 },
+      { id: '2', label: 'Preprocess', icon: <Wand2 />, desc: 'Token optimization', x: 280, y: 220 },
+      { id: '3', label: 'Fine-tune', icon: <Cpu />, desc: 'Weight adjustment', x: 560, y: 220 },
+      { id: '4', label: 'Model', icon: <BarChart3 />, desc: 'Production Ready', x: 840, y: 220 }
+    ];
+
+    // Pop each node
+    for (const nodeData of demoNodesData) {
+      await sleep(600);
+      const newNode: Node = {
+        id: nodeData.id,
+        type: 'custom',
+        data: { label: nodeData.label, icon: nodeData.icon, desc: nodeData.desc, isActive: true },
+        position: { x: nodeData.x, y: nodeData.y },
+      };
+      setNodes((nds) => [...nds, newNode]);
+      fitView({ duration: 800, padding: 1.2 });
+      
+      // Briefly deactivate isActive to stop the shine after pop
+      setTimeout(() => {
+        setNodes((nds) => nds.map(n => n.id === nodeData.id ? { ...n, data: { ...n.data, isActive: false } } : n));
+      }, 1000);
+    }
+
+    // Connect nodes one by one
+    await sleep(800);
+    for (let i = 0; i < demoNodesData.length - 1; i++) {
+      await sleep(600);
+      
+      // Light up the nodes involved in connection
+      setNodes((nds) => nds.map(n => 
+        (n.id === demoNodesData[i].id || n.id === demoNodesData[i+1].id) 
+          ? { ...n, data: { ...n.data, isActive: true } } 
+          : n
+      ));
+
+        const edge: Edge = {
+          id: `e${demoNodesData[i].id}-${demoNodesData[i+1].id}`,
+          source: demoNodesData[i].id,
+          target: demoNodesData[i+1].id,
+          type: 'straight',
+          animated: true,
+          style: { stroke: '#ffffff', strokeWidth: 1, opacity: 0.6 },
+          markerEnd: { type: MarkerType.ArrowClosed, color: '#ffffff', width: 10, height: 10 }
+        };
+      setEdges((eds) => [...eds, edge]);
+      
+      await sleep(400);
+      setNodes((nds) => nds.map(n => ({ ...n, data: { ...n.data, isActive: false } })));
+    }
+
+    // Final finish sequence
+    await sleep(1500);
+    
+    // Mark the final model node as successful with maximum shine
+    setNodes((nds) => nds.map(node => 
+      node.id === '4' ? { ...node, data: { ...node.data, isSuccess: true, isActive: false } } : node
+    ));
+
+    setShowNotification(true);
+    setIsDemoRunning(false);
+
+    // Auto hide notification
+    setTimeout(() => setShowNotification(false), 5000);
+  }, [isDemoRunning, setNodes, setEdges, fitView]);
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting && !hasStartedRef.current) {
+          hasStartedRef.current = true;
+          runDemo();
+        }
       },
-      position: { x: 100, y: 100 },
-    };
-    setNodes((nds) => nds.concat(newNode));
-  };
+      { threshold: 0.5 }
+    );
+
+    if (containerRef.current) {
+      observer.observe(containerRef.current);
+    }
+
+    return () => observer.disconnect();
+  }, [runDemo]);
 
   return (
-    <div className="w-full h-[600px] border border-white/5 rounded-2xl bg-[#080808] overflow-hidden relative group">
+    <div ref={containerRef} className="w-full h-[600px] border border-white/5 rounded-2xl bg-[#080808] overflow-hidden relative group">
+      {/* Notification Overlay */}
+      {showNotification && (
+        <div className="absolute top-24 left-1/2 -translate-x-1/2 z-50 animate-pop">
+          <div className="bg-white text-black px-6 py-4 rounded-lg flex items-center gap-4 shadow-[0_0_50px_rgba(255,255,255,0.2)] border border-white/20">
+            <div className="bg-black/5 p-2 rounded-full">
+              <CheckCircle2 className="w-5 h-5 text-black" />
+            </div>
+            <div>
+              <p className="text-xs font-black uppercase tracking-widest">Pipeline Complete</p>
+              <p className="text-[10px] opacity-60 font-medium">Model successfully deployed to edge node</p>
+            </div>
+            <button 
+              onClick={() => setShowNotification(false)}
+              className="ml-4 hover:opacity-50 transition-opacity"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Industrial Controls */}
       <div className="absolute top-8 left-8 right-8 z-20 flex items-center justify-between pointer-events-none">
         <div className="flex items-center gap-4 pointer-events-auto">
           <div className="px-4 py-2 bg-white/5 border border-white/10 rounded backdrop-blur-sm flex items-center gap-3">
-            <div className="w-1.5 h-1.5 bg-white rounded-full animate-pulse" />
-            <span className="text-[9px] uppercase font-black tracking-[0.3em] text-white/50">Node Designer Mode</span>
+            <div className={cn("w-1.5 h-1.5 rounded-full animate-pulse", isDemoRunning ? "bg-green-500 shadow-[0_0_10px_#22c55e]" : "bg-white")} />
+            <span className="text-[9px] uppercase font-black tracking-[0.3em] text-white/50">
+              {isDemoRunning ? 'Processing Pipeline...' : 'Node Designer Mode'}
+            </span>
           </div>
-          
-          <div className="flex items-center gap-1 p-1 bg-white/5 border border-white/10 rounded">
-            <button 
-              onClick={() => addNode('Model')} 
-              className="p-2 hover:bg-white/10 rounded text-white/40 hover:text-white transition-all flex items-center gap-2 px-3"
-            >
-              <Plus className="w-3 h-3" />
-              <span className="text-[9px] uppercase font-bold tracking-widest">Add Node</span>
-            </button>
-          </div>
-        </div>
-
-        <div className="pointer-events-auto">
-          <button className="flex items-center gap-3 px-6 py-2.5 bg-white text-black rounded hover:bg-white/90 transition-all font-bold shadow-[0_0_20px_rgba(255,255,255,0.1)]">
-            <Play className="w-3 h-3 fill-current" />
-            <span className="text-[10px] uppercase font-black tracking-[0.2em]">Demo</span>
-          </button>
         </div>
       </div>
       
@@ -134,20 +262,21 @@ export default function HeroFlow() {
         onConnect={onConnect}
         nodeTypes={nodeTypes}
         fitView
-        fitViewOptions={{ padding: 0.4 }}
-        translateExtent={[[0, 0], [1400, 600]]}
-        nodeExtent={[[0, 0], [1400, 600]]}
+        fitViewOptions={{ padding: 1.2 }}
+        translateExtent={[[-500, -500], [1500, 1500]]}
+        nodeExtent={[[-500, -500], [1500, 1500]]}
         zoomOnScroll={false}
         zoomOnPinch={false}
         zoomOnDoubleClick={false}
         panOnDrag={false}
         panOnScroll={false}
+        minZoom={0.1}
         preventScrolling={true}
-        nodesDraggable={true}
-        elementsSelectable={true}
+        nodesDraggable={!isDemoRunning}
+        elementsSelectable={!isDemoRunning}
         proOptions={{ hideAttribution: true }}
       >
-        <Background color="#111" gap={40} size={1} />
+        <Background color="#ffffff" variant="dots" gap={40} size={1} style={{ backgroundColor: '#1a1a1a' }} />
         <Controls 
           showZoom={false} 
           showFitView={false} 
@@ -159,5 +288,13 @@ export default function HeroFlow() {
       {/* Edge Vignette */}
       <div className="absolute inset-0 pointer-events-none border border-white/5" />
     </div>
+  );
+}
+
+export default function HeroFlow() {
+  return (
+    <ReactFlowProvider>
+      <FlowContent />
+    </ReactFlowProvider>
   );
 }
