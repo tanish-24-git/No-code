@@ -49,5 +49,10 @@ export async function uploadFile<T = unknown>(path: string, file: File): Promise
 }
 
 export function sseUrl(path: string): string {
+  // If we're in the browser and using the proxy (BASE is empty), try to go 
+  // direct to the backend port for SSE to avoid Next.js rewrite buffering.
+  if (typeof window !== 'undefined' && !BASE && window.location.hostname === 'localhost') {
+    return `http://localhost:8000${path}`;
+  }
   return url(path);
 }

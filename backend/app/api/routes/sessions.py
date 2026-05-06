@@ -88,7 +88,15 @@ async def stream_session_events(session_id: str) -> StreamingResponse:
         finally:
             bus.detach_sse(session_id, q)
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable buffering in some proxies
+        }
+    )
 
 
 @router.post("/api/sessions/{session_id}/messages")
