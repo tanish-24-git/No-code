@@ -5,12 +5,14 @@ __pycache__/
 *.so
 .Python
 build/
+*.csv
 develop-eggs/
 dist/
 downloads/
 eggs/
 .eggs/
 lib/
+!frontend/src/lib/
 lib64/
 parts/
 sdist/

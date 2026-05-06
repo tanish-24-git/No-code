@@ -10,7 +10,7 @@ import { cn } from '@/lib/cn';
 const links = [
   { href: '/', label: 'home' },
   { href: '/playground', label: 'playground' },
-  { href: '/inference', label: 'inference' },
+  { href: '/test', label: 'test' },
   { href: '/models', label: 'models' },
   { href: '/settings', label: 'settings' },
 ];

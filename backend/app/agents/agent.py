@@ -9,12 +9,10 @@ from app.agents.providers import stream_chat
 from app.api.schemas.agent import ChatMessage
 
 
-def _augment_system(pipeline_id: str | None, inference_id: str | None, dataset_id: str | None) -> str:
+def _augment_system(pipeline_id: str | None, dataset_id: str | None) -> str:
     parts: list[str] = []
     if pipeline_id:
         parts.append(f"The user is currently on pipeline `{pipeline_id}`.")
-    if inference_id:
-        parts.append(f"The user wants to focus on inference endpoint `{inference_id}`.")
     if dataset_id:
         parts.append(f"The user is referring to dataset `{dataset_id}`.")
     return "\n".join(parts)
@@ -24,7 +22,6 @@ def run_chat(
     messages: list[ChatMessage],
     *,
     pipeline_id: str | None = None,
-    inference_id: str | None = None,
     dataset_id: str | None = None,
 ) -> Iterator[str]:
     # Imported lazily so cold imports of this module don't read settings.
@@ -51,5 +48,5 @@ def run_chat(
         model=cfg.model,
         base_url=cfg.base_url,
         messages=history,
-        extra_system=_augment_system(pipeline_id, inference_id, dataset_id),
+        extra_system=_augment_system(pipeline_id, dataset_id),
     )

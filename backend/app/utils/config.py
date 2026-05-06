@@ -60,7 +60,8 @@ class Settings(BaseSettings):
     def ensure_dirs(self) -> None:
         for p in (self.data_dir, self.upload_dir, self.models_dir):
             p.mkdir(parents=True, exist_ok=True)
-        for sub in ("datasets", "pipelines", "jobs", "inferences", "models"):
+        for sub in ("datasets", "pipelines", "jobs", "models",
+                    "sessions", "decisions", "events"):
             (self.data_dir / sub).mkdir(parents=True, exist_ok=True)
 
 

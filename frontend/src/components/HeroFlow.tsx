@@ -1,10 +1,11 @@
 'use client';
 
 import React, { useMemo, useCallback, useState, useEffect, useRef } from 'react';
-import ReactFlow, { 
-  Background, 
-  Controls, 
-  Node, 
+import ReactFlow, {
+  Background,
+  BackgroundVariant,
+  Controls,
+  Node,
   Edge,
   Handle,
   Position,
@@ -276,7 +277,7 @@ function FlowContent() {
         elementsSelectable={!isDemoRunning}
         proOptions={{ hideAttribution: true }}
       >
-        <Background color="#ffffff" variant="dots" gap={40} size={1} style={{ backgroundColor: '#1a1a1a' }} />
+        <Background color="#ffffff" variant={BackgroundVariant.Dots} gap={40} size={1} style={{ backgroundColor: '#1a1a1a' }} />
         <Controls 
           showZoom={false} 
           showFitView={false} 

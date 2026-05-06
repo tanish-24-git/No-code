@@ -1,199 +1,296 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+/**
+ * Session-driven playground.
+ *
+ *   left  — session list, dataset upload (auto-starts a session on success)
+ *   center — pipeline canvas (read-only preview of the auto-built graph)
+ *   right  — AgentActivity: live SSE-driven console (cards + chat)
+ */
+import { useEffect, useState } from 'react';
 import useSWR from 'swr';
-import { api, fetcher } from '@/lib/api';
-import type { NodeGraph, Pipeline, PipelineConfig } from '@/lib/types';
-import { PipelineSwitcher } from '@/components/PipelineSwitcher';
+import { api, fetcher, uploadFile } from '@/lib/api';
+import type {
+  AgentSession,
+  Dataset,
+  DatasetUploadResponse,
+  Pipeline,
+  SessionListItem,
+} from '@/lib/types';
+import { AgentActivity } from '@/components/AgentActivity';
 import { PipelineCanvas } from '@/components/PipelineCanvas';
-import { Inspector } from '@/components/Inspector';
-import { AgentChat } from '@/components/AgentChat';
-import { LogPanel } from '@/components/LogPanel';
-import { DatasetUploader } from '@/components/DatasetUploader';
-import { Play, PanelRight, MessageSquare, Terminal, Settings } from 'lucide-react';
 import { cn } from '@/lib/cn';
+import {
+  Database,
+  Loader2,
+  Play,
+  Plus,
+  Upload,
+  XCircle,
+} from 'lucide-react';
+
+const STAGE_TONE: Record<string, string> = {
+  init: 'bg-white/5 text-white/40',
+  profiling: 'bg-info/10 text-info',
+  clarifying: 'bg-warn/10 text-warn',
+  planning: 'bg-info/10 text-info',
+  awaiting_approval: 'bg-warn/10 text-warn',
+  executing: 'bg-info/10 text-info',
+  monitoring: 'bg-info/10 text-info',
+  recovering: 'bg-warn/10 text-warn',
+  evaluating: 'bg-info/10 text-info',
+  awaiting_export_choice: 'bg-warn/10 text-warn',
+  finalizing: 'bg-info/10 text-info',
+  done: 'bg-success/10 text-success',
+  failed: 'bg-danger/10 text-danger',
+  cancelled: 'bg-white/5 text-white/40',
+};
 
 export default function PlaygroundPage() {
-  const { data: pipelines, mutate: mutateList } = useSWR<Pipeline[]>('/api/pipelines', fetcher);
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const [_selectedNode, setSelectedNode] = useState<string | null>(null);
-  const [jobId, setJobId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'inspector' | 'chat' | 'logs'>('inspector');
+  const { data: sessions, mutate: mutateSessions } = useSWR<SessionListItem[]>(
+    '/api/sessions',
+    fetcher,
+    { refreshInterval: 3000 },
+  );
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
 
+  // Auto-select most recent session if none selected.
   useEffect(() => {
-    if (!activeId && pipelines && pipelines.length > 0) {
-      setActiveId(pipelines[0].id);
+    if (!activeSessionId && sessions && sessions.length > 0) {
+      setActiveSessionId(sessions[0].id);
     }
-  }, [pipelines, activeId]);
+  }, [sessions, activeSessionId]);
 
-  const { data: pipeline, mutate: mutatePipeline } = useSWR<Pipeline>(
-    activeId ? `/api/pipelines/${activeId}` : null,
+  const { data: session } = useSWR<AgentSession>(
+    activeSessionId ? `/api/sessions/${activeSessionId}` : null,
+    fetcher,
+    { refreshInterval: 1500 },
+  );
+
+  const pipelineId = session?.pipeline_id;
+  const { data: pipeline } = useSWR<Pipeline>(
+    pipelineId ? `/api/pipelines/${pipelineId}` : null,
+    fetcher,
+    { refreshInterval: 2500 },
+  );
+
+  const { data: dataset } = useSWR<Dataset>(
+    session?.dataset_id ? `/api/datasets/${session.dataset_id}` : null,
     fetcher,
   );
 
-  const startJob = async () => {
-    if (!activeId) return;
-    const r = await api<{ job_id: string }>('/api/jobs/start', {
-      method: 'POST',
-      body: JSON.stringify({ pipeline_id: activeId }),
-    });
-    setJobId(r.job_id);
+  const handleFile = async (file: File) => {
+    setUploading(true);
+    try {
+      const r = (await uploadFile('/api/datasets/upload', file)) as DatasetUploadResponse;
+      setActiveSessionId(r.session_id);
+      mutateSessions();
+    } finally {
+      setUploading(false);
+    }
   };
 
-  const updateConfig = async (patch: Partial<PipelineConfig>) => {
-    if (!pipeline) return;
-    const merged = { ...pipeline.config, ...patch };
-    const updated = await api<Pipeline>(`/api/pipelines/${pipeline.id}`, {
-      method: 'PUT',
-      body: JSON.stringify({ config: merged }),
-    });
-    mutatePipeline(updated, false);
-  };
-
-  const updateGraph = async (graph: NodeGraph) => {
-    if (!pipeline) return;
-    api(`/api/pipelines/${pipeline.id}`, { method: 'PUT', body: JSON.stringify({ node_graph: graph }) }).catch(() => {});
-  };
-
-  const attachDataset = async (datasetId: string) => {
-    if (!pipeline) return;
-    await updateConfig({ dataset_id: datasetId || null });
+  const cancelSession = async (id: string) => {
+    await api(`/api/sessions/${id}/cancel`, { method: 'POST' }).catch(() => {});
+    mutateSessions();
   };
 
   return (
-    <div className="h-screen bg-black flex flex-col overflow-hidden">
-      {/* Streamlined Header */}
-      <header className="h-16 border-b border-white/10 px-6 flex items-center justify-between bg-black z-30">
-        <div className="flex items-center gap-6">
-          <PipelineSwitcher
-            pipelines={pipelines ?? []}
-            activeId={activeId}
-            onSelect={(id) => setActiveId(id)}
-            onCreated={(p) => {
-              mutateList();
-              setActiveId(p.id);
-            }}
-          />
-          {pipeline && (
-            <div className="h-4 w-px bg-white/10" />
-          )}
-          {pipeline && (
-            <div className="flex items-center gap-4">
-               <span className="text-[10px] font-black uppercase tracking-[0.2em] text-white/40">Active Project:</span>
-               <span className="text-[11px] font-bold text-white uppercase tracking-widest">{pipeline.name}</span>
+    <div className="h-[calc(100vh-52px)] bg-black flex overflow-hidden">
+      {/* ── Left rail ─────────────────────────────────────────────────── */}
+      <aside className="w-[280px] border-r border-white/5 flex flex-col bg-[#050505]">
+        {/* Upload hero */}
+        <div className="p-4 border-b border-white/5">
+          <label
+            className={cn(
+              'block w-full cursor-pointer rounded-lg border-2 border-dashed transition-all',
+              uploading
+                ? 'border-white/10 bg-white/[0.02] opacity-60 cursor-wait'
+                : 'border-white/15 hover:border-white/40 hover:bg-white/[0.03]',
+            )}
+          >
+            <input
+              type="file"
+              accept=".csv,.json,.jsonl"
+              className="hidden"
+              disabled={uploading}
+              onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
+            />
+            <div className="px-4 py-6 text-center space-y-2">
+              {uploading ? (
+                <Loader2 className="w-5 h-5 text-white/60 mx-auto animate-spin" />
+              ) : (
+                <Upload className="w-5 h-5 text-white/60 mx-auto" />
+              )}
+              <p className="text-[10px] uppercase tracking-[0.25em] font-black text-white/60">
+                {uploading ? 'Processing…' : 'Drop dataset to start'}
+              </p>
+              <p className="text-[9px] uppercase tracking-widest text-white/30 font-medium">
+                .csv .json .jsonl
+              </p>
+            </div>
+          </label>
+        </div>
+
+        {/* Session list */}
+        <div className="flex-1 overflow-y-auto">
+          <div className="px-4 py-3 flex items-center gap-2">
+            <Database className="w-3 h-3 text-white/30" />
+            <span className="text-[9px] uppercase tracking-[0.25em] font-black text-white/40">
+              Sessions
+            </span>
+            <span className="ml-auto text-[10px] font-mono text-white/30">{sessions?.length ?? 0}</span>
+          </div>
+          <div className="px-2 space-y-1 pb-4">
+            {(sessions ?? []).map((s) => {
+              const active = s.id === activeSessionId;
+              return (
+                <div
+                  key={s.id}
+                  className={cn(
+                    'group rounded-md border transition-all',
+                    active
+                      ? 'border-white/20 bg-white/[0.04]'
+                      : 'border-transparent hover:border-white/10 hover:bg-white/[0.02]',
+                  )}
+                >
+                  <button
+                    onClick={() => setActiveSessionId(s.id)}
+                    className="w-full text-left px-3 py-2.5"
+                  >
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[10px] font-mono text-white/40">
+                        {s.id.slice(0, 8)}
+                      </span>
+                      <span
+                        className={cn(
+                          'px-1.5 py-0.5 rounded text-[8px] uppercase tracking-widest font-black',
+                          STAGE_TONE[s.state] ?? 'bg-white/5 text-white/40',
+                        )}
+                      >
+                        {s.state.replace(/_/g, ' ')}
+                      </span>
+                    </div>
+                    <div className="text-[10px] text-white/40 font-mono truncate">
+                      {new Date(s.updated_at).toLocaleTimeString()}
+                    </div>
+                  </button>
+                  {active && !['done', 'failed', 'cancelled'].includes(s.state) && (
+                    <button
+                      onClick={() => cancelSession(s.id)}
+                      className="w-full flex items-center justify-center gap-1.5 py-1.5 text-[9px] uppercase tracking-widest font-black text-white/40 hover:text-danger border-t border-white/5"
+                    >
+                      <XCircle className="w-3 h-3" /> cancel
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+            {sessions?.length === 0 && (
+              <div className="px-3 py-6 text-center">
+                <p className="text-[10px] uppercase tracking-widest text-white/30 font-black">
+                  No sessions yet
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      </aside>
+
+      {/* ── Center: pipeline canvas ───────────────────────────────────── */}
+      <main className="flex-1 flex flex-col min-w-0 relative">
+        <header className="h-14 px-5 border-b border-white/5 bg-black flex items-center gap-4">
+          {dataset ? (
+            <>
+              <Database className="w-4 h-4 text-white/40" />
+              <div className="min-w-0">
+                <div className="text-[12px] font-bold text-white truncate">{dataset.name}</div>
+                <div className="text-[10px] uppercase tracking-widest text-white/40 font-black">
+                  {dataset.row_count} rows · {dataset.column_names.length} cols · {dataset.file_type}
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="text-[10px] uppercase tracking-[0.3em] text-white/30 font-black">
+              No active session
             </div>
           )}
-        </div>
+          {pipeline && (
+            <>
+              <div className="h-6 w-px bg-white/10" />
+              <div className="text-[11px] text-white/70 font-medium">{pipeline.name}</div>
+              {pipeline.is_agent_configured && (
+                <span className="px-2 py-0.5 bg-success/10 text-success rounded text-[9px] font-black uppercase tracking-widest">
+                  Agent built
+                </span>
+              )}
+            </>
+          )}
+          <div className="ml-auto flex items-center gap-2">
+            {session && (
+              <span
+                className={cn(
+                  'px-2.5 py-1 rounded text-[9px] uppercase tracking-widest font-black',
+                  STAGE_TONE[session.state] ?? 'bg-white/5 text-white/40',
+                )}
+              >
+                {session.state.replace(/_/g, ' ')}
+              </span>
+            )}
+          </div>
+        </header>
 
-        <div className="flex items-center gap-4">
-          <button 
-            className="flex items-center gap-2 px-4 py-2 bg-white text-black rounded text-[10px] font-black uppercase tracking-widest hover:bg-white/90 transition-all shadow-[0_0_20px_rgba(255,255,255,0.1)]"
-            onClick={startJob} 
-            disabled={!activeId}
-          >
-            <Play className="w-3 h-3 fill-current" />
-            Run Execution
-          </button>
-        </div>
-      </header>
-
-      <main className="flex-1 flex min-h-0 relative">
-        {/* Massive Canvas Area */}
-        <div className="flex-1 relative flex flex-col min-w-0">
+        <div className="flex-1 relative">
           {pipeline ? (
-            <div className="flex-1 relative">
-              <PipelineCanvas
-                pipeline={pipeline}
-                onGraphChange={updateGraph}
-                onSelectNode={setSelectedNode}
-              />
-              
-              {/* Floating Overlay Controls */}
-              <div className="absolute top-6 left-6 z-10 flex flex-col gap-4">
-                <DatasetUploader 
-                  pipelineId={pipeline.id} 
-                  attachedId={pipeline.config.dataset_id ?? null} 
-                  onAttach={attachDataset} 
-                />
+            <PipelineCanvas
+              pipeline={pipeline}
+              onGraphChange={() => {}}
+              onSelectNode={() => {}}
+            />
+          ) : session ? (
+            <div className="h-full flex items-center justify-center">
+              <div className="text-center space-y-2">
+                <Loader2 className="w-5 h-5 text-white/30 mx-auto animate-spin" />
+                <p className="text-[10px] uppercase tracking-[0.3em] text-white/30 font-black">
+                  Agent is drafting your pipeline…
+                </p>
               </div>
             </div>
           ) : (
-            <div className="flex-1 flex items-center justify-center">
-              <p className="text-white/20 uppercase text-[10px] font-black tracking-[0.3em] animate-pulse">Initializing Studio...</p>
-            </div>
+            <EmptyState />
           )}
-
-          {/* Collapsible Bottom Logs */}
-          <div className="h-40 border-t border-white/10 bg-black/50 backdrop-blur-xl overflow-hidden flex flex-col">
-            <div className="px-4 py-2 border-b border-white/5 flex items-center gap-2">
-              <Terminal className="w-3 h-3 text-white/40" />
-              <span className="text-[9px] font-black uppercase tracking-widest text-white/40">Telemetry Output</span>
-            </div>
-            <div className="flex-1 overflow-y-auto p-4 font-mono text-[10px]">
-              <LogPanel jobId={jobId} />
-            </div>
-          </div>
         </div>
-
-        {/* Streamlined Right Inspector Panel */}
-        <aside className="w-[400px] border-l border-white/10 flex flex-col bg-[#050505] z-20">
-          {/* Tab Navigation */}
-          <div className="flex border-b border-white/5">
-            <TabButton 
-              active={activeTab === 'inspector'} 
-              onClick={() => setActiveTab('inspector')}
-              icon={<Settings className="w-3.5 h-3.5" />}
-              label="Config"
-            />
-            <TabButton 
-              active={activeTab === 'chat'} 
-              onClick={() => setActiveTab('chat')}
-              icon={<MessageSquare className="w-3.5 h-3.5" />}
-              label="Agent"
-            />
-          </div>
-
-          <div className="flex-1 overflow-y-auto">
-            {activeTab === 'inspector' && pipeline && (
-              <div className="p-6">
-                <h3 className="text-[10px] font-black uppercase tracking-[0.3em] text-white/40 mb-8">Pipeline Parameters</h3>
-                <Inspector pipeline={pipeline} onPatch={updateConfig} />
-              </div>
-            )}
-            
-            {activeTab === 'chat' && (
-              <div className="h-full flex flex-col">
-                <AgentChat
-                  pipelineId={activeId ?? undefined}
-                  datasetId={pipeline?.config.dataset_id ?? undefined}
-                  onPipelineChanged={() => mutatePipeline()}
-                />
-              </div>
-            )}
-
-            {!pipeline && activeTab === 'inspector' && (
-              <div className="p-12 text-center">
-                 <p className="text-white/20 uppercase text-[10px] font-black tracking-widest">Select project to view config</p>
-              </div>
-            )}
-          </div>
-        </aside>
       </main>
+
+      {/* ── Right: live agent activity ────────────────────────────────── */}
+      <aside className="w-[440px] border-l border-white/5 flex flex-col bg-[#050505] min-w-0">
+        <AgentActivity sessionId={activeSessionId} />
+      </aside>
     </div>
   );
 }
 
-function TabButton({ active, onClick, icon, label }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string }) {
+function EmptyState() {
   return (
-    <button 
-      onClick={onClick}
-      className={cn(
-        "flex-1 flex items-center justify-center gap-2 py-4 border-b-2 transition-all",
-        active ? "border-white bg-white/5 text-white" : "border-transparent text-white/30 hover:text-white/60"
-      )}
-    >
-      {icon}
-      <span className="text-[10px] font-black uppercase tracking-widest">{label}</span>
-    </button>
+    <div className="h-full flex items-center justify-center">
+      <div className="max-w-md text-center space-y-6 px-12">
+        <div className="w-16 h-16 mx-auto rounded-2xl border border-white/10 bg-white/[0.02] flex items-center justify-center">
+          <Plus className="w-7 h-7 text-white/40" />
+        </div>
+        <div className="space-y-2">
+          <h2 className="text-2xl font-bold text-white">Drop a dataset</h2>
+          <p className="text-[12px] text-white/50 leading-relaxed">
+            Upload a CSV / JSON / JSONL file from the panel on the left. Agents will profile it,
+            ask any clarifying questions, draft a pipeline, and walk you through training and
+            export — all live in this view.
+          </p>
+        </div>
+        <div className="flex items-center justify-center gap-2 text-[10px] uppercase tracking-[0.25em] text-white/40 font-black">
+          <Play className="w-3 h-3" />
+          One upload starts the agent
+        </div>
+      </div>
+    </div>
   );
 }

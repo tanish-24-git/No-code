@@ -13,7 +13,6 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     pipeline_id: Optional[str] = None
-    inference_id: Optional[str] = None  # focus the agent on a specific endpoint
     dataset_id: Optional[str] = None
 
 

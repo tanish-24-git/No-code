@@ -6,21 +6,12 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
-from app.services import dataset_service, inference_service, pipeline_service
+from app.services import dataset_service, pipeline_service
 from app.storage import store
 from app.utils.hardware import detect_hardware
 
 
 # ── Tool implementations ───────────────────────────────────────────────────
-
-def _list_inferences(_: dict[str, Any]) -> Any:
-    return [r.model_dump(mode="json") for r in inference_service.list_all()]
-
-
-def _get_inference(args: dict[str, Any]) -> Any:
-    rec = inference_service.get(args["inference_id"])
-    return rec.model_dump(mode="json") if rec else {"error": "not found"}
-
 
 def _get_hardware(_: dict[str, Any]) -> Any:
     return detect_hardware()
@@ -44,18 +35,6 @@ def _suggest_pipeline_config(args: dict[str, Any]) -> Any:
     return rec.model_dump(mode="json") if rec else {"error": "pipeline not found"}
 
 
-def _suggest_inference_metrics(args: dict[str, Any]) -> Any:
-    record_id = args["inference_id"]
-    raw = store.read("inferences", record_id)
-    if not raw:
-        return {"error": "inference not found"}
-    raw["suggested_metrics"] = {**raw.get("suggested_metrics", {}), **args.get("metrics", {})}
-    if args.get("reasoning"):
-        raw["metrics_reasoning"] = {**raw.get("metrics_reasoning", {}), **args.get("reasoning", {})}
-    store.write("inferences", record_id, raw)
-    return {"ok": True, "suggested_metrics": raw["suggested_metrics"]}
-
-
 # ── Tool registry (canonical schema) ───────────────────────────────────────
 
 ToolFn = Callable[[dict[str, Any]], Any]
@@ -72,22 +51,6 @@ class Tool:
 
 
 TOOLS: list[Tool] = [
-    Tool(
-        "list_inferences",
-        "List all inference endpoints the user has registered (Ollama, OpenAI-compatible, HF, Anthropic). Returns name, kind, base_url, default model, and last reachability probe.",
-        {"type": "object", "properties": {}},
-        _list_inferences,
-    ),
-    Tool(
-        "get_inference",
-        "Get full details of a single registered inference endpoint by id.",
-        {
-            "type": "object",
-            "properties": {"inference_id": {"type": "string"}},
-            "required": ["inference_id"],
-        },
-        _get_inference,
-    ),
     Tool(
         "get_hardware",
         "Detect local hardware (CPU/GPU, VRAM, CUDA). Use before recommending precision, batch size, or quantization.",
@@ -124,20 +87,6 @@ TOOLS: list[Tool] = [
         },
         _suggest_pipeline_config,
     ),
-    Tool(
-        "suggest_inference_metrics",
-        "Recommend generation metrics for an inference endpoint. The metrics dict is saved on the endpoint record. Use after get_inference and get_hardware. Typical keys: max_tokens, temperature, top_p, top_k, num_ctx, num_thread, stop, frequency_penalty, presence_penalty.",
-        {
-            "type": "object",
-            "properties": {
-                "inference_id": {"type": "string"},
-                "metrics": {"type": "object"},
-                "reasoning": {"type": "object", "additionalProperties": {"type": "string"}},
-            },
-            "required": ["inference_id", "metrics"],
-        },
-        _suggest_inference_metrics,
-    ),
 ]
 
 
@@ -156,21 +105,19 @@ def run_tool(name: str, args: dict[str, Any]) -> tuple[str, bool]:
         return json.dumps({"error": str(e)}), True
 
 
-SYSTEM_PROMPT = """You are FineTune Studio's pipeline + inference copilot.
+SYSTEM_PROMPT = """You are FineTune Studio's pipeline copilot.
 
 You help the user:
 - choose base models and hyperparameters for fine-tuning,
-- understand and tune their LOCAL inference endpoints (Ollama, OpenAI-
-  compatible servers, HF Inference, etc.),
-- pick generation parameters (max_tokens, temperature, top_p, num_ctx,
-  num_thread, stop sequences) appropriate to the endpoint and use case,
-- diagnose mismatches between training data and inference settings.
+- map dataset structure to a sensible training task,
+- pick precision, batch size, sequence length, and quantization that fit
+  the user's hardware.
 
 Use the available tools liberally. Always inspect what the user actually has
-(list_inferences, get_hardware, get_dataset) before giving recommendations.
-When you suggest config, justify each non-default value briefly. If the user
-has an active pipeline, you may call suggest_pipeline_config to write your
-recommendation back to that pipeline.
+(get_hardware, get_dataset) before giving recommendations. When you suggest
+config, justify each non-default value briefly. If the user has an active
+pipeline, you may call suggest_pipeline_config to write your recommendation
+back to that pipeline.
 
 Keep responses concise; prefer short tables to walls of prose.
 """

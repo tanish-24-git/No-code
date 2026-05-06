@@ -31,7 +31,6 @@ async def chat(payload: ChatRequest) -> StreamingResponse:
                 for chunk in run_chat(
                     payload.messages,
                     pipeline_id=payload.pipeline_id,
-                    inference_id=payload.inference_id,
                     dataset_id=payload.dataset_id,
                 ):
                     asyncio.run_coroutine_threadsafe(queue.put(chunk), loop)
