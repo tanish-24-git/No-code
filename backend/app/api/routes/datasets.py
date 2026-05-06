@@ -1,24 +1,54 @@
-"""Dataset management routes. Files land on disk; metadata lands in JSON store."""
+"""Dataset management routes. The upload endpoint is the canonical entry
+point of the agent runtime: a successful upload starts an AgentSession and
+publishes DatasetUploaded on the bus, which kicks off the whole pipeline.
+
+The response carries `session_id` so the frontend can immediately attach
+the SSE stream and render the agent activity panel before the user types.
+"""
 from __future__ import annotations
 
 from fastapi import APIRouter, File, HTTPException, Response, UploadFile
+from pydantic import BaseModel
 
 from app.api.schemas.dataset import DatasetSchema
-from app.services import dataset_service
+from app.events.bus import get_bus
+from app.events.types import AgentEvent
+from app.services import dataset_service, session_service
 
 
 router = APIRouter(prefix="/api/datasets", tags=["datasets"])
 
 
-@router.post("/upload", response_model=DatasetSchema, status_code=201)
-async def upload_dataset(file: UploadFile = File(...)) -> DatasetSchema:
+class DatasetUploadResponse(BaseModel):
+    dataset: DatasetSchema
+    session_id: str
+
+
+@router.post("/upload", response_model=DatasetUploadResponse, status_code=201)
+async def upload_dataset(file: UploadFile = File(...)) -> DatasetUploadResponse:
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="Empty file")
     try:
-        return dataset_service.save_uploaded(file.filename or "dataset", contents)
+        dataset = dataset_service.save_uploaded(file.filename or "dataset", contents)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+    # Start the agent session and emit the first event. The orchestrator
+    # posts the welcome message; downstream agents take it from there.
+    session = session_service.start_for_dataset(dataset.id)
+    bus = get_bus()
+
+    await bus.publish(AgentEvent(
+        session_id=session.id, kind="SessionStarted", actor="system",
+        payload={"dataset_id": dataset.id},
+    ))
+    await bus.publish(AgentEvent(
+        session_id=session.id, kind="DatasetUploaded", actor="system",
+        payload={"dataset_id": dataset.id, "name": dataset.name},
+    ))
+
+    return DatasetUploadResponse(dataset=dataset, session_id=session.id)
 
 
 @router.get("", response_model=list[DatasetSchema])

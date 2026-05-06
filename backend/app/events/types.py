@@ -1,0 +1,74 @@
+"""Canonical event taxonomy. Every state transition in the agent runtime is an
+event of one of these kinds. Add a new kind here when you add a new agent
+behaviour, never inline strings elsewhere."""
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Literal, Optional
+
+from pydantic import BaseModel, Field
+
+
+EventKind = Literal[
+    # Session lifecycle
+    "SessionStarted", "SessionPaused", "SessionResumed", "SessionClosed",
+    # Dataset intake & profiling
+    "DatasetUploaded",
+    "IntakeStarted", "IntakeCompleted",
+    "DatasetProfileStarted", "DatasetProfileCompleted",
+    # Task inference & clarification
+    "TaskInferenceStarted", "TaskInferred", "IntentConfidenceLow",
+    "UserClarificationRequested", "UserClarificationReceived",
+    # Hardware
+    "HardwareProfileStarted", "HardwareProfileCompleted",
+    # Model selection / strategy / planning
+    "CandidateModelsRanked", "StrategyChosen",
+    "PipelineDraftRequested", "PipelineDraftCreated",
+    "PipelineApprovalRequested", "PipelineApproved", "PipelineRejected",
+    # Execute / monitor / recover
+    "PipelineExecutionStarted",
+    "TrainingMetricUpdated",
+    "TrainingAnomalyDetected", "RecoveryPlanGenerated",
+    "RetryRequested", "RetryApproved", "RetryDenied",
+    # Wrap-up
+    "TrainingCompleted", "EvaluationStarted", "EvaluationCompleted",
+    "ExportChoiceRequested",
+    "SaveLocalRequested", "PushToHFRequested",
+    "ExportCompleted",
+    # Conversational + audit
+    "AssistantMessage",         # what the chat panel renders as a chat bubble
+    "UserMessage",              # free-text from the user
+    "AgentToolCalled",          # one entry per tool call, for the trace
+    "AgentDecisionRecorded",    # references a decision_id in the audit log
+    "Error",
+]
+
+
+def _new_id() -> str:
+    return uuid.uuid4().hex
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class AgentEvent(BaseModel):
+    """Append-only message on the bus. Persisted to data/events/<session>.jsonl."""
+
+    id: str = Field(default_factory=_new_id)
+    session_id: str
+    kind: EventKind
+    actor: str                              # agent name, "user", or "system"
+    parent_event_id: Optional[str] = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    rationale: Optional[str] = None
+    confidence: Optional[float] = None      # 0..1 when applicable
+    decision_id: Optional[str] = None       # link into decision_log
+    created_at: datetime = Field(default_factory=_now)
+
+    def as_sse(self) -> str:
+        """Format as a Server-Sent Event frame."""
+        import json
+        body = self.model_dump(mode="json")
+        return f"event: {self.kind}\ndata: {json.dumps(body)}\n\n"

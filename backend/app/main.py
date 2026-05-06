@@ -1,27 +1,34 @@
-"""FineTune Studio API. No Redis, no MinIO, no database, no Docker.
+"""FineTune Studio API.
 
-Just FastAPI + JSON files on disk. The LLM provider is configured via
-.env (LLM_PROVIDER / LLM_API_KEY / LLM_MODEL / LLM_BASE_URL) or via the
-Settings page in the UI; the UI takes precedence when both are set.
+Two surfaces live here:
+    1. The legacy stateless chat endpoint at /api/agent/chat (kept for the
+       existing UI; useful as an "ask" channel).
+    2. The new session-based, event-driven, multi-agent runtime at
+       /api/sessions/* — auto-triggered by /api/datasets/upload.
+
+Both share the same provider config and JSON-on-disk store.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.agents.wiring import register_agents
 from app.api.routes import (
     agent,
     datasets,
     health,
-    inference,
     jobs,
     models,
     pipelines,
+    sessions,
     settings as settings_routes,
 )
+from app.events.bus import get_bus
 from app.utils.config import settings
 
 
@@ -31,8 +38,6 @@ log = logging.getLogger("finetune-studio")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    # Resolved config at boot. We log a single human-readable summary so it
-    # is obvious whether the user still needs to configure anything.
     from app.api.routes.settings import get_hf_token_resolved, get_llm_config
 
     cfg = get_llm_config()
@@ -59,13 +64,23 @@ async def lifespan(_app: FastAPI):
     else:
         log.info("Hugging Face token: not set (only needed for model pull/push)")
 
+    # Bind the running event loop to the bus and register agents. This needs
+    # to happen here (not at import time) because background threads will
+    # publish via run_coroutine_threadsafe.
+    bus = get_bus()
+    bus.bind_loop(asyncio.get_running_loop())
+    register_agents(bus)
+    # Importing app.tools triggers tool registration as a side effect.
+    import app.tools  # noqa: F401
+    log.info("agent runtime ready")
+
     yield
 
 
 app = FastAPI(
     title="FineTune Studio API",
-    version="2.0.0",
-    description="Local-first, open-source LLM fine-tuning + inference copilot.",
+    version="3.0.0",
+    description="Local-first, open-source autonomous fine-tuning agent platform.",
     lifespan=lifespan,
 )
 
@@ -83,17 +98,19 @@ app.include_router(datasets.router)
 app.include_router(pipelines.router)
 app.include_router(jobs.router)
 app.include_router(models.router)
-app.include_router(inference.router)
 app.include_router(agent.router)
+app.include_router(sessions.router)
+app.include_router(sessions.tools_router)
 
 
 @app.get("/")
 def root() -> dict:
     return {
         "name": "FineTune Studio API",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "docs": "/docs",
         "health": "/health",
+        "sessions": "/api/sessions",
     }
 
 

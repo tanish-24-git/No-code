@@ -17,6 +17,8 @@ from typing import Any, Callable
 
 from app.api.schemas.job import JobMetric, JobRecord, JobStatus
 from app.api.schemas.pipeline import NodeGraph, PipelineConfig, PipelineRecord
+from app.events.bus import get_bus
+from app.events.types import AgentEvent
 from app.services import pipeline_service
 from app.storage import store
 from app.utils.config import settings
@@ -28,6 +30,36 @@ _log_locks: dict[str, threading.Lock] = {}
 _log_subscribers: dict[str, list[asyncio.Queue]] = {}
 _terminal: dict[str, bool] = {}
 _stop_flags: dict[str, threading.Event] = {}
+
+# job_id -> session_id, populated by ExecutionAgent. Lets the worker thread
+# publish TrainingMetricUpdated events to the right session bus.
+_job_to_session: dict[str, str] = {}
+
+
+def bind_job_to_session(job_id: str, session_id: str) -> None:
+    _job_to_session[job_id] = session_id
+
+
+def session_for_job(job_id: str) -> str | None:
+    return _job_to_session.get(job_id)
+
+
+def _publish_metric_event(job: JobRecord, terminal: bool = False) -> None:
+    sid = _job_to_session.get(job.id)
+    if not sid:
+        return
+    payload = {
+        "job_id": job.id,
+        "step": job.current_step,
+        "epoch": job.current_epoch,
+        "loss": job.current_loss,
+        "status": job.status,
+        "terminal": terminal,
+    }
+    get_bus().publish_threadsafe(AgentEvent(
+        session_id=sid, kind="TrainingMetricUpdated",
+        actor="job_service", payload=payload,
+    ))
 
 
 def _job_log_path(job_id: str) -> Path:
@@ -187,6 +219,8 @@ def _set_status(job: JobRecord, status: JobStatus, **patch: Any) -> JobRecord:
     for k, v in patch.items():
         setattr(job, k, v)
     _persist(job)
+    if status in ("completed", "failed", "stopped"):
+        _publish_metric_event(job, terminal=True)
     return job
 
 
@@ -304,6 +338,7 @@ def _handler_train(job: JobRecord, config: PipelineConfig, node: dict[str, Any],
             )
             _persist(job)
             log(f"[METRIC] epoch={epoch} step={job.current_step} loss={job.current_loss}")
+            _publish_metric_event(job)
     out = settings.models_dir / job.id
     out.mkdir(parents=True, exist_ok=True)
     (out / "README.md").write_text(f"# Stub artifact for job {job.id}\n", encoding="utf-8")
