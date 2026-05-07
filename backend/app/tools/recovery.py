@@ -1,12 +1,28 @@
 """Recovery proposes a plan diff (ops, rationale, confidence) instead of
 performing a blind retry. The agent emits the diff; only after user (or
-policy) approval does the execution agent apply it."""
+policy) approval does the execution agent apply it.
+
+Blueprint §9 — Three-level TAO ladder (Think → Act → Observe):
+
+    Level 1 (retry)    transient I/O / API timeouts → resume from checkpoint
+    Level 2 (adapt)    OOM / divergence              → mutate config and retry
+    Level 3 (escalate) data corruption / hardware    → stop and produce a
+                                                        diagnostic report
+
+Every recovery attempt records its level so the UI can render the depth
+of intervention.
+"""
 from __future__ import annotations
 
 import uuid
 from typing import Any
 
 from app.tools.registry import ToolContext, tool
+
+
+_LEVEL1 = {"network_timeout", "rate_limit", "checkpoint_unavailable"}
+_LEVEL2 = {"loss_nan_or_inf", "loss_no_decrease", "loss_spike", "oom", "vram_exceeded"}
+_LEVEL3 = {"data_corruption", "hardware_failure", "cuda_unavailable"}
 
 
 @tool(
@@ -30,8 +46,16 @@ async def recovery_propose_plan(args: dict[str, Any], _ctx: ToolContext) -> dict
     ops: list[dict[str, Any]] = []
     rationale: str = "no recovery available"
     confidence = 0.5
+    level = "L0"
 
-    if anomaly == "loss_nan_or_inf":
+    if anomaly in _LEVEL1:
+        # Transient — just retry with backoff.
+        ops = [{"op": "noop", "path": "retry", "old": None, "new": "with_backoff"}]
+        rationale = f"{anomaly} is transient; retrying with exponential backoff"
+        confidence = 0.85
+        level = "L1"
+
+    elif anomaly == "loss_nan_or_inf":
         new_lr = max((cfg.get("learning_rate") or 2e-4) * 0.25, 1e-5)
         ops = [
             {"op": "set", "path": "config.learning_rate", "old": cfg.get("learning_rate"), "new": new_lr},
@@ -39,6 +63,8 @@ async def recovery_propose_plan(args: dict[str, Any], _ctx: ToolContext) -> dict
         ]
         rationale = "non-finite loss — drop LR by 4x and force fp16 to stabilise gradients"
         confidence = 0.7
+        level = "L2"
+
     elif anomaly == "loss_no_decrease":
         new_lr = (cfg.get("learning_rate") or 2e-4) * 0.5
         ops = [
@@ -47,6 +73,8 @@ async def recovery_propose_plan(args: dict[str, Any], _ctx: ToolContext) -> dict
         ]
         rationale = "loss flat — halve LR and add an epoch to give gradient descent more room"
         confidence = 0.6
+        level = "L2"
+
     elif anomaly == "loss_spike":
         old_bs = cfg.get("batch_size", 4) or 4
         ops = [
@@ -57,9 +85,37 @@ async def recovery_propose_plan(args: dict[str, Any], _ctx: ToolContext) -> dict
         ]
         rationale = "sudden loss spike — halve batch and double grad-accum to reduce per-step variance"
         confidence = 0.55
+        level = "L2"
+
+    elif anomaly in {"oom", "vram_exceeded"}:
+        # Aggressive memory recovery — gradient checkpointing, smaller seq.
+        old_seq = int(cfg.get("max_seq_len") or 512)
+        old_bs = cfg.get("batch_size", 4) or 4
+        ops = [
+            {"op": "set", "path": "config.batch_size", "old": old_bs, "new": max(1, old_bs // 2)},
+            {"op": "set", "path": "config.gradient_accumulation",
+             "old": cfg.get("gradient_accumulation"),
+             "new": (cfg.get("gradient_accumulation", 4) or 4) * 2},
+            {"op": "set", "path": "config.max_seq_len", "old": old_seq, "new": max(256, old_seq // 2)},
+            {"op": "set", "path": "config.gradient_checkpointing", "old": cfg.get("gradient_checkpointing"), "new": True},
+        ]
+        rationale = "OOM — halve batch, halve sequence length, enable gradient checkpointing"
+        confidence = 0.75
+        level = "L2"
+
+    elif anomaly in _LEVEL3:
+        # Cannot adapt — produce a diagnostic and stop.
+        ops = [{"op": "stop", "path": "session", "old": None, "new": "escalate_to_user"}]
+        rationale = (
+            f"{anomaly} is irrecoverable from inside the agent; "
+            "producing a diagnostic report for the user"
+        )
+        confidence = 0.95
+        level = "L3"
 
     return {
         "diff_id": diff_id,
+        "level": level,
         "operations": ops,
         "rationale": rationale,
         "confidence": confidence,

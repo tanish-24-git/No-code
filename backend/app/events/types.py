@@ -17,6 +17,7 @@ EventKind = Literal[
     "DatasetUploaded",
     "IntakeStarted", "IntakeCompleted",
     "DatasetProfileStarted", "DatasetProfileCompleted",
+    "DataHealthReport",          # Data Alchemist surfaces ‹crap-vs-fortune› verdict
     # Task inference & clarification
     "TaskInferenceStarted", "TaskInferred", "IntentConfidenceLow",
     "UserClarificationRequested", "UserClarificationReceived",
@@ -36,13 +37,37 @@ EventKind = Literal[
     "ExportChoiceRequested",
     "SaveLocalRequested", "PushToHFRequested",
     "ExportCompleted",
-    # Conversational + audit
+    # ── Socratic / interactive streaming kinds ────────────────────────────
+    # See blueprint §3.1. payload.stream is one of:
+    #   "thinking"   — internal reasoning trace ("I am currently…")
+    #   "planning"   — step-by-step task breakdown
+    #   "asking"     — interactive dialogue ⇒ pauses execution until user answers
+    #   "garnishing" — UI finalization (nodes, edges, animations)
+    #   "executing"  — live execution log tail
+    "AgentThinking",            # purple in UI
+    "AgentPlanning",            # blue in UI
+    "AgentAsking",              # yellow in UI; pairs with UserClarificationRequested
+    "AgentGarnishing",          # cyan in UI; one per node animation step
+    "AgentExecuting",           # green in UI; live tail
+    # ── Hierarchy / collaboration ─────────────────────────────────────────
+    "BlackboardUpdated",        # any agent posts to the federated blackboard
+    "AuditCritique",            # Audit Agent (Critic) reviews a plan
+    "AuditOverride",            # Critic vetoed; user or master must resolve
+    "SandboxBenchmarkStarted",
+    "SandboxBenchmarkCompleted",
+    "CircuitBreakerTripped",    # too many loops detected on the same kind
+    "CheckpointSaved",          # session checkpoint persisted
+    # ── Conversational + audit ────────────────────────────────────────────
     "AssistantMessage",         # what the chat panel renders as a chat bubble
     "UserMessage",              # free-text from the user
     "AgentToolCalled",          # one entry per tool call, for the trace
     "AgentDecisionRecorded",    # references a decision_id in the audit log
     "Error",
 ]
+
+
+# Visual stream tone — mapped to UI colors per blueprint §11.
+StreamTone = Literal["thinking", "planning", "asking", "garnishing", "executing"]
 
 
 def _new_id() -> str:

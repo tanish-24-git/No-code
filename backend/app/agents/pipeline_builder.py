@@ -71,6 +71,11 @@ class PipelineBuilderAgent(BaseAgent):
             session_id,
         )
 
+        # 3b. Garnishing — stream node materialization to the UI so the
+        # ReactFlow canvas pops each node into existence with a glow.
+        for n in nodes:
+            await self.garnish(session_id, n, parent=event.id)
+
         # 4. Build a human-readable summary card.
         est_minutes = float(event.payload.get("estimated_minutes") or 0.0)
         summary = await self.call_tool(

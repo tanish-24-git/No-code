@@ -11,6 +11,7 @@ import { api, fetcher } from '@/lib/api';
 import { useSessionEvents } from '@/lib/sse';
 import { cn } from '@/lib/cn';
 import type { AgentEvent, AgentSession, EventKind } from '@/lib/types';
+import { SocraticStream } from './SocraticStream';
 import {
   Activity,
   AlertTriangle,
@@ -20,6 +21,7 @@ import {
   ChevronRight,
   Cpu,
   Database,
+  Eye,
   FileText,
   GitBranch,
   HelpCircle,
@@ -27,6 +29,7 @@ import {
   PackageCheck,
   Play,
   Send,
+  ShieldCheck,
   Sparkles,
   User,
   XCircle,
@@ -59,10 +62,18 @@ const STORY_KINDS: ReadonlySet<EventKind> = new Set([
   'RetryDenied',
   'TrainingCompleted',
   'EvaluationCompleted',
+  'SandboxBenchmarkCompleted',
   'ExportChoiceRequested',
   'ExportCompleted',
   'SessionClosed',
   'Error',
+]);
+
+const COGNITION_KINDS: ReadonlySet<EventKind> = new Set([
+  'AgentThinking', 'AgentPlanning', 'AgentAsking', 'AgentGarnishing', 'AgentExecuting',
+  'AuditCritique', 'AuditOverride',
+  'SandboxBenchmarkStarted', 'SandboxBenchmarkCompleted',
+  'CircuitBreakerTripped', 'DataHealthReport',
 ]);
 
 const STAGE_LABEL: Record<string, string> = {
@@ -92,6 +103,7 @@ export function AgentActivity({ sessionId }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [showRunLog, setShowRunLog] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [tab, setTab] = useState<'story' | 'cognition'>('story');
 
   // Refresh session detail when meaningful events arrive.
   useEffect(() => {
@@ -120,7 +132,11 @@ export function AgentActivity({ sessionId }: Props) {
   }, [events.length]);
 
   const story = useMemo(() => events.filter((e) => STORY_KINDS.has(e.kind)), [events]);
-  const noise = useMemo(() => events.filter((e) => !STORY_KINDS.has(e.kind)), [events]);
+  const cognition = useMemo(() => events.filter((e) => COGNITION_KINDS.has(e.kind)), [events]);
+  const noise = useMemo(
+    () => events.filter((e) => !STORY_KINDS.has(e.kind) && !COGNITION_KINDS.has(e.kind)),
+    [events],
+  );
 
   if (!sessionId) {
     return (
@@ -140,24 +156,49 @@ export function AgentActivity({ sessionId }: Props) {
       {/* Stage header */}
       <StageHeader session={session} connected={connected} closed={closed} />
 
+      {/* Tab strip */}
+      <div className="flex items-center gap-1 px-3 py-1.5 border-b border-white/5 bg-[#070707]">
+        <TabButton
+          active={tab === 'story'}
+          onClick={() => setTab('story')}
+          icon={<Sparkles className="w-3 h-3" />}
+          label={`Story · ${story.length}`}
+        />
+        <TabButton
+          active={tab === 'cognition'}
+          onClick={() => setTab('cognition')}
+          icon={<Brain className="w-3 h-3" />}
+          label={`Cognition · ${cognition.length}`}
+          highlight={cognition.length > 0 && tab !== 'cognition'}
+        />
+      </div>
+
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-3 scrollbar-thin">
-        {story.length === 0 && (
+        {tab === 'story' && story.length === 0 && (
           <div className="flex items-center gap-3 text-[11px] text-white/40">
             <Loader2 className="w-3.5 h-3.5 animate-spin" />
             Booting agents…
           </div>
         )}
-        {story.map((e) => (
-          <EventCard
-            key={e.id}
-            event={e}
-            session={session}
-            sessionId={sessionId}
-            onAction={() => mutateSession()}
-            busy={busy}
-            setBusy={setBusy}
-          />
-        ))}
+        {tab === 'story' &&
+          story.map((e) => (
+            <EventCard
+              key={e.id}
+              event={e}
+              session={session}
+              sessionId={sessionId}
+              onAction={() => mutateSession()}
+              busy={busy}
+              setBusy={setBusy}
+            />
+          ))}
+        {tab === 'cognition' && cognition.length === 0 && (
+          <div className="flex flex-col items-center gap-2 text-[11px] text-white/40 py-12 text-center">
+            <Brain className="w-5 h-5 text-white/20" />
+            <span>Agents will start streaming their thinking here once a dataset is uploaded.</span>
+          </div>
+        )}
+        {tab === 'cognition' && <SocraticStream events={cognition} />}
       </div>
 
       {/* Collapsible run log of internal events */}
@@ -187,6 +228,38 @@ export function AgentActivity({ sessionId }: Props) {
       {/* Bottom message bar (free-form messages → /messages endpoint) */}
       <MessageBar sessionId={sessionId} disabled={closed} />
     </div>
+  );
+}
+
+function TabButton({
+  active,
+  onClick,
+  icon,
+  label,
+  highlight,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+  label: string;
+  highlight?: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        'relative px-2.5 py-1.5 rounded text-[10px] uppercase tracking-[0.18em] font-black flex items-center gap-1.5 transition-all',
+        active
+          ? 'bg-white/10 text-white'
+          : 'text-white/40 hover:text-white/80 hover:bg-white/5',
+      )}
+    >
+      {icon}
+      {label}
+      {highlight && (
+        <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-thinking shadow-[0_0_8px_rgba(168,85,247,0.7)]" />
+      )}
+    </button>
   );
 }
 
@@ -284,6 +357,8 @@ function EventCard(props: CardProps) {
       return <StatusCard icon={<CheckCircle2 className="w-4 h-4" />} tone="success" title="Training finished" />;
     case 'EvaluationCompleted':
       return <EvaluationCard event={event} />;
+    case 'SandboxBenchmarkCompleted':
+      return <SandboxCard event={event} />;
     case 'ExportChoiceRequested':
       return <ExportChoiceCard {...props} />;
     case 'ExportCompleted':
@@ -595,6 +670,26 @@ function EvaluationCard({ event }: { event: AgentEvent }) {
         <Stat label="Loss" value={typeof e.final_loss === 'number' ? e.final_loss.toFixed(4) : '-'} />
         <Stat label="Score" value={score ? `${score}%` : '-'} />
         <Stat label="Steps" value={String(e.training_steps ?? '-')} />
+      </div>
+    </div>
+  );
+}
+
+function SandboxCard({ event }: { event: AgentEvent }) {
+  const benchmarks = (event.payload.benchmarks as Array<{ name: string; score: number; n?: number }>) ?? [];
+  return (
+    <div className="border border-success/30 bg-success/[0.04] rounded-lg p-3.5 space-y-2.5">
+      <div className="flex items-center gap-2">
+        <Eye className="w-4 h-4 text-success" />
+        <p className="text-[10px] uppercase tracking-[0.25em] text-success font-black">Sandbox benchmarks</p>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        {benchmarks.map((b) => (
+          <div key={b.name} className="flex items-center justify-between bg-black/30 border border-white/5 rounded px-2 py-1.5">
+            <span className="text-[9px] uppercase tracking-widest text-white/40 font-black">{b.name}</span>
+            <span className="text-[12px] font-mono text-white/85">{(b.score * 100).toFixed(0)}%</span>
+          </div>
+        ))}
       </div>
     </div>
   );
