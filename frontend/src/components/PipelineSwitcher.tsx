@@ -39,7 +39,7 @@ export function PipelineSwitcher({ pipelines, activeId, onSelect, onCreated }: P
         {pipelines.length === 0 && <option value="">no pipelines yet</option>}
         {pipelines.map((p) => (
           <option key={p.id} value={p.id}>
-            {p.name} {p.is_agent_configured ? '✓' : ''}
+            {p.name} {p.is_agent_configured ? '[built]' : ''}
           </option>
         ))}
       </select>

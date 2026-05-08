@@ -53,9 +53,23 @@ class TrainingStrategyAgent(BaseAgent):
             rationale=f"priority={priority}",
         )
 
+        # Streaming "thinking" rationale — blueprint commandment §7.
+        for line in strategy.get("rationale") or []:
+            await self.think(session_id, line, parent=event.id)
+
+        # Plan card with the SOTA stack so the user sees DoRA/GaLore/Unsloth.
+        stack_bits = [strategy["method"]]
+        if strategy.get("adapter_variant") and strategy["adapter_variant"] != "none":
+            stack_bits.append(f"+{strategy['adapter_variant'].upper()}")
+        if strategy.get("kernel_pack") and strategy["kernel_pack"] != "standard":
+            stack_bits.append(f"·{strategy['kernel_pack']}")
+        if strategy.get("quantization") and strategy["quantization"] != "none":
+            stack_bits.append(f"·{strategy['quantization']}")
+        stack = " ".join(stack_bits)
+
         await self.emit_message(
             session_id,
-            f"Strategy: {strategy['method']} / {strategy['precision']} / "
+            f"Strategy: **{stack}** / {strategy['precision']} / "
             f"batch {strategy['batch_size']}×{strategy['gradient_accumulation']} grad accum / "
             f"seq {strategy['max_seq_len']} / {strategy['epochs']}ep. "
             f"~{est_min:.1f} min estimated.",

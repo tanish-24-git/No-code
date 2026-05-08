@@ -208,6 +208,7 @@ export type EventKind =
   | 'SessionStarted' | 'SessionPaused' | 'SessionResumed' | 'SessionClosed'
   | 'DatasetUploaded' | 'IntakeStarted' | 'IntakeCompleted'
   | 'DatasetProfileStarted' | 'DatasetProfileCompleted'
+  | 'DataHealthReport'
   | 'TaskInferenceStarted' | 'TaskInferred' | 'IntentConfidenceLow'
   | 'UserClarificationRequested' | 'UserClarificationReceived'
   | 'HardwareProfileStarted' | 'HardwareProfileCompleted'
@@ -221,8 +222,15 @@ export type EventKind =
   | 'TrainingCompleted' | 'EvaluationStarted' | 'EvaluationCompleted'
   | 'ExportChoiceRequested'
   | 'SaveLocalRequested' | 'PushToHFRequested' | 'ExportCompleted'
+  | 'AgentThinking' | 'AgentPlanning' | 'AgentAsking' | 'AgentGarnishing' | 'AgentExecuting'
+  | 'BlackboardUpdated'
+  | 'AuditCritique' | 'AuditOverride'
+  | 'SandboxBenchmarkStarted' | 'SandboxBenchmarkCompleted'
+  | 'CircuitBreakerTripped' | 'CheckpointSaved'
   | 'AssistantMessage' | 'UserMessage'
   | 'AgentToolCalled' | 'AgentDecisionRecorded' | 'Error';
+
+export type StreamTone = 'thinking' | 'planning' | 'asking' | 'garnishing' | 'executing';
 
 export type AgentEvent = {
   id: string;

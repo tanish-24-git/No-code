@@ -42,6 +42,7 @@ export function useSessionEvents(sessionId: string | null | undefined) {
       'SessionStarted', 'SessionClosed',
       'DatasetUploaded', 'IntakeStarted', 'IntakeCompleted',
       'DatasetProfileStarted', 'DatasetProfileCompleted',
+      'DataHealthReport',
       'TaskInferred', 'IntentConfidenceLow',
       'UserClarificationRequested', 'UserClarificationReceived',
       'HardwareProfileStarted', 'HardwareProfileCompleted',
@@ -54,6 +55,12 @@ export function useSessionEvents(sessionId: string | null | undefined) {
       'TrainingCompleted', 'EvaluationStarted', 'EvaluationCompleted',
       'ExportChoiceRequested', 'SaveLocalRequested', 'PushToHFRequested',
       'ExportCompleted',
+      // Socratic stream + hierarchy + sandbox + circuit-breaker
+      'AgentThinking', 'AgentPlanning', 'AgentAsking', 'AgentGarnishing', 'AgentExecuting',
+      'BlackboardUpdated',
+      'AuditCritique', 'AuditOverride',
+      'SandboxBenchmarkStarted', 'SandboxBenchmarkCompleted',
+      'CircuitBreakerTripped', 'CheckpointSaved',
       'AssistantMessage', 'UserMessage',
       'AgentToolCalled', 'AgentDecisionRecorded', 'Error',
     ];

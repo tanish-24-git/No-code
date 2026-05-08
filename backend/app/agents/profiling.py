@@ -26,6 +26,12 @@ class DatasetProfilingAgent(BaseAgent):
             return
 
         await self.emit("DatasetProfileStarted", session_id, payload={"dataset_id": dataset_id})
+        await self.think(
+            session_id,
+            "Computing token-length distribution, exact-row hash dedup, "
+            "per-column missing rates, and class balance.",
+            parent=event.id,
+        )
         await self.emit_message(session_id, "Profiling token lengths, duplicates, missing values, and class balance…", parent=event.id)
 
         tokens = await self.call_tool("dataset.profile_tokens", {"dataset_id": dataset_id}, session_id)

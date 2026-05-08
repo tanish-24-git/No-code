@@ -18,6 +18,7 @@ class JobMetric(BaseModel):
 
 
 class JobRecord(BaseModel):
+    model_config = {"protected_namespaces": ()}
     id: str
     pipeline_id: str
     status: JobStatus = "queued"

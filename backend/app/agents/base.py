@@ -2,11 +2,15 @@
 
 An agent's life:
     1. Bus delivers an event of `triggers` kind.
-    2. Agent reads session state.
+    2. Agent reads session state + the federated blackboard.
     3. Agent calls tools.
     4. Agent emits new events (which schedule other agents).
 
 Agents never call other agents directly — coupling is via the bus.
+
+Blueprint §3.1 streaming kinds (thinking / planning / asking / garnishing /
+executing) are first-class helpers on this class so every agent emits a
+consistent visual narrative without copying boilerplate.
 """
 from __future__ import annotations
 
@@ -14,8 +18,9 @@ import logging
 from typing import Any, Optional
 
 from app.events.bus import EventBus
-from app.events.types import AgentEvent, EventKind
+from app.events.types import AgentEvent, EventKind, StreamTone
 from app.services import session_service
+from app.services.blackboard import get_blackboard
 from app.tools.registry import ToolContext, run_tool
 
 
@@ -80,3 +85,114 @@ class BaseAgent:
 
     def get_session(self, session_id: str):
         return session_service.get(session_id)
+
+    # ── Socratic / streaming helpers (blueprint §3.1) ──────────────────────
+
+    async def think(
+        self,
+        session_id: str,
+        thought: str,
+        *,
+        parent: Optional[str] = None,
+        meta: Optional[dict[str, Any]] = None,
+    ) -> AgentEvent:
+        """Stream an internal-reasoning trace. Mirrored to the blackboard."""
+        get_blackboard().post(session_id, "thoughts", agent=self.name, content=thought, meta=meta)
+        return await self.emit(
+            "AgentThinking",
+            session_id,
+            payload={"stream": "thinking", "agent": self.name, "text": thought, "meta": meta or {}},
+            parent_event_id=parent,
+        )
+
+    async def plan(
+        self,
+        session_id: str,
+        steps: list[str],
+        *,
+        title: Optional[str] = None,
+        parent: Optional[str] = None,
+    ) -> AgentEvent:
+        get_blackboard().post(
+            session_id,
+            "plans",
+            agent=self.name,
+            content=title or "plan",
+            meta={"steps": steps},
+        )
+        return await self.emit(
+            "AgentPlanning",
+            session_id,
+            payload={"stream": "planning", "agent": self.name, "title": title or "plan", "steps": steps},
+            parent_event_id=parent,
+        )
+
+    async def ask(
+        self,
+        session_id: str,
+        question: str,
+        *,
+        parent: Optional[str] = None,
+        impact: str = "medium",
+    ) -> AgentEvent:
+        """Surface a Socratic question. Pairs with UserClarificationRequested
+        when a structured catalog question is involved."""
+        get_blackboard().post(
+            session_id,
+            "questions",
+            agent=self.name,
+            content=question,
+            meta={"impact": impact},
+        )
+        return await self.emit(
+            "AgentAsking",
+            session_id,
+            payload={"stream": "asking", "agent": self.name, "question": question, "impact": impact},
+            parent_event_id=parent,
+        )
+
+    async def garnish(
+        self,
+        session_id: str,
+        node: dict[str, Any],
+        *,
+        parent: Optional[str] = None,
+    ) -> AgentEvent:
+        """Stream a UI-side scaffold step. The frontend pops the node into
+        the canvas with the prescribed ``glow`` class — see blueprint §3.2."""
+        get_blackboard().post(session_id, "nodes", agent=self.name, content=node.get("type", "node"), meta=node)
+        return await self.emit(
+            "AgentGarnishing",
+            session_id,
+            payload={"stream": "garnishing", "agent": self.name, "node": node},
+            parent_event_id=parent,
+        )
+
+    async def stream_executing(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        parent: Optional[str] = None,
+    ) -> AgentEvent:
+        return await self.emit(
+            "AgentExecuting",
+            session_id,
+            payload={"stream": "executing", "agent": self.name, "text": message},
+            parent_event_id=parent,
+        )
+
+    # Convenience: the blackboard surface, exposed read-only.
+
+    def blackboard(self):
+        return get_blackboard()
+
+    def stream_kind_for(self, tone: StreamTone) -> EventKind:
+        """Route a stream tone string to its concrete event kind."""
+        return {
+            "thinking": "AgentThinking",
+            "planning": "AgentPlanning",
+            "asking": "AgentAsking",
+            "garnishing": "AgentGarnishing",
+            "executing": "AgentExecuting",
+        }[tone]

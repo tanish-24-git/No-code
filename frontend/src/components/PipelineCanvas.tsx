@@ -28,11 +28,12 @@ type Props = {
 
 function PipelineNode({ data }: { data: any }) {
   const Icon = data.type === 'train' ? Cpu : data.type === 'dataset' ? Database : Box;
-  
+  const fresh = data.fresh as boolean | undefined;
+
   return (
-    <div className="group relative">
+    <div className={cn('group relative animate-pop-in', fresh && 'animate-glow')}>
       <div className="absolute inset-0 bg-white/[0.01] blur-md rounded-lg opacity-0 group-hover:opacity-100 transition-opacity" />
-      
+
       <div className="relative w-[200px] bg-black border border-white/10 rounded-md overflow-hidden hover:border-white/40 transition-all duration-300">
         <div className="px-3 py-2 bg-white/5 border-b border-white/5 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -41,7 +42,12 @@ function PipelineNode({ data }: { data: any }) {
               {data.type}
             </span>
           </div>
-          <div className="w-1.5 h-1.5 rounded-full bg-white/20" />
+          <div
+            className={cn(
+              'w-1.5 h-1.5 rounded-full',
+              fresh ? 'bg-garnishing shadow-[0_0_8px_rgba(6,182,212,0.7)]' : 'bg-white/20',
+            )}
+          />
         </div>
 
         <div className="px-3 py-2.5">
@@ -51,6 +57,11 @@ function PipelineNode({ data }: { data: any }) {
           {data.status && (
             <p className="text-[8px] text-white/30 uppercase font-black tracking-widest mt-1">
               {data.status}
+            </p>
+          )}
+          {data.thought && (
+            <p className="text-[9px] text-thinking/80 italic leading-snug mt-1 line-clamp-2">
+              {String(data.thought)}
             </p>
           )}
         </div>
@@ -65,8 +76,15 @@ function PipelineNode({ data }: { data: any }) {
 const nodeTypes: NodeTypes = {
   dataset: PipelineNode,
   preprocess: PipelineNode,
+  balance: PipelineNode,
+  split: PipelineNode,
+  augment: PipelineNode,
+  redact: PipelineNode,
+  template_prompts: PipelineNode,
+  convert_format: PipelineNode,
   train: PipelineNode,
   evaluate: PipelineNode,
+  sandbox: PipelineNode,
   export: PipelineNode,
 };
 

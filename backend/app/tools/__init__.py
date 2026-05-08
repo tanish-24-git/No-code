@@ -9,6 +9,7 @@ from app.tools.registry import REGISTRY, ToolDef, ToolContext, get_tool, run_too
 
 # Side-effecting imports register their tools.
 from app.tools import (  # noqa: F401
+    alchemy,
     audit,
     clarify,
     data,
@@ -21,6 +22,7 @@ from app.tools import (  # noqa: F401
     model,
     pipeline,
     recovery,
+    sandbox,
     strategy,
     task,
 )
