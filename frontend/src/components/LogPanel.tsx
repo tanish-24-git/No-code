@@ -37,8 +37,19 @@ export function LogPanel({ jobId }: Props) {
     return () => es.close();
   }, [jobId]);
 
+  const isAtBottom = useRef(true);
+
+  const handleScroll = () => {
+    if (!scrollRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
+    const threshold = 100;
+    isAtBottom.current = scrollHeight - scrollTop - clientHeight < threshold;
+  };
+
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+    if (isAtBottom.current) {
+      scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+    }
   }, [lines.length]);
 
   return (
@@ -48,7 +59,11 @@ export function LogPanel({ jobId }: Props) {
         <span className="uppercase tracking-wider text-fg-2">job logs</span>
         {jobId && <span className="ml-auto text-fg-3 font-mono text-[10px]">{jobId.slice(0, 8)}</span>}
       </div>
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-3 font-mono text-[11px] space-y-0.5">
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto p-3 font-mono text-[11px] space-y-0.5"
+      >
         {!jobId && <div className="text-fg-3">click run to start a job — logs stream here.</div>}
         {lines.map((l, i) => (
           <div key={i} className={COLOR(l)}>

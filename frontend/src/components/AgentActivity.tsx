@@ -127,8 +127,20 @@ export function AgentActivity({ sessionId }: Props) {
     }
   }, [events, mutateSession]);
 
+  const isAtBottom = useRef(true);
+
+  const handleScroll = () => {
+    if (!scrollRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
+    // Consider "at bottom" if within 100px of the actual bottom
+    const threshold = 100;
+    isAtBottom.current = scrollHeight - scrollTop - clientHeight < threshold;
+  };
+
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+    if (isAtBottom.current) {
+      scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+    }
   }, [events.length]);
 
   const story = useMemo(() => events.filter((e) => STORY_KINDS.has(e.kind)), [events]);
@@ -173,7 +185,11 @@ export function AgentActivity({ sessionId }: Props) {
         />
       </div>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-3 scrollbar-thin">
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto px-5 py-4 space-y-3 scrollbar-thin"
+      >
         {tab === 'story' && story.length === 0 && (
           <div className="flex items-center gap-3 text-[11px] text-white/40">
             <Loader2 className="w-3.5 h-3.5 animate-spin" />
