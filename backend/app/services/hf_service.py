@@ -2,6 +2,7 @@
 trained artifact. Uses the user's HF token from settings."""
 from __future__ import annotations
 
+import logging
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,8 @@ from app.api.routes.settings import get_hf_token
 from app.storage import store
 from app.utils.config import settings
 
+
+log = logging.getLogger("finetune-studio.hf")
 
 _pull_status: dict[str, dict[str, Any]] = {}
 _push_status: dict[str, dict[str, Any]] = {}
@@ -70,16 +73,47 @@ def start_push(model_id: str, repo_id: str) -> dict[str, Any]:
 
     def _worker() -> None:
         try:
+            log.info(f"Starting HF push for model {model_id} to {repo_id}")
             from huggingface_hub import HfApi, create_repo  # local import; heavy
+            
+            log.info(f"Verifying/creating repo {repo_id}")
             create_repo(repo_id, token=token, exist_ok=True, private=False)
-            HfApi().upload_folder(folder_path=local_path, repo_id=repo_id, token=token)
-            raw["hf_repo_id"] = repo_id
-            raw["is_pushed_to_hub"] = True
-            raw["push_status"] = "done"
-            store.write("models", model_id, raw)
+            
+            log.info(f"Uploading folder {local_path} to {repo_id}")
+            # Ensure local_path is a string and exists
+            p = Path(local_path)
+            if not p.exists():
+                raise ValueError(f"Local path {local_path} does not exist")
+                
+            api = HfApi()
+            api.upload_folder(
+                folder_path=str(local_path),
+                repo_id=repo_id,
+                token=token,
+                commit_message=f"Upload trained model {model_id}"
+            )
+            
+            log.info(f"Upload complete for {model_id}. Updating model record.")
+            # Refetch raw in case it changed
+            raw_updated = store.read("models", model_id) or raw
+            raw_updated["hf_repo_id"] = repo_id
+            raw_updated["is_pushed_to_hub"] = True
+            raw_updated["push_status"] = "done"
+            raw_updated["pushed_at"] = datetime.now(timezone.utc).isoformat()
+            
+            store.write("models", model_id, raw_updated)
             _push_status[model_id] = {"status": "done", "repo_id": repo_id, "model_id": model_id}
+            log.info(f"Model {model_id} record updated with push status.")
+            
         except Exception as e:
-            _push_status[model_id] = {"status": "failed", "repo_id": repo_id, "model_id": model_id, "error": str(e)}
+            log.exception(f"Failed to push model {model_id} to HF")
+            _push_status[model_id] = {
+                "status": "failed",
+                "repo_id": repo_id,
+                "model_id": model_id,
+                "error": str(e),
+                "failed_at": datetime.now(timezone.utc).isoformat()
+            }
 
     threading.Thread(target=_worker, daemon=True).start()
     return _push_status[model_id]
