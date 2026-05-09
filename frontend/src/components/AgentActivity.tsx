@@ -18,7 +18,7 @@ import { api, fetcher } from '@/lib/api';
 import { useSessionEvents } from '@/lib/sse';
 import { cn } from '@/lib/cn';
 import type { AgentEvent, AgentSession, EventKind } from '@/lib/types';
-import { Loader2, Send } from 'lucide-react';
+import { Brain, ClipboardList, Loader2, Send } from 'lucide-react';
 
 
 // ── Folding rules ─────────────────────────────────────────────────────────
@@ -42,6 +42,8 @@ const CHAT_KINDS: ReadonlySet<EventKind> = new Set([
   'RecoveryPlanGenerated',
   'SessionClosed',
   'Error',
+  'AgentThinking',
+  'AgentPlanning',
 ]);
 
 const STAGE_LABEL: Record<string, string> = {
@@ -97,16 +99,58 @@ export function AgentActivity({ sessionId }: Props) {
     }
   }, [events, mutateSession]);
 
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-  }, [events.length]);
+  const transcript = useMemo(() => {
+    const raw = events.filter((e) => CHAT_KINDS.has(e.kind));
+    const result: AgentEvent[] = [];
 
-  const transcript = useMemo(() => events.filter((e) => CHAT_KINDS.has(e.kind)), [events]);
+    for (const e of raw) {
+      const payload = { ...e.payload };
+      const last = result[result.length - 1];
+
+      // Delta grouping logic for AssistantMessage and AgentThinking
+      const currentDelta = payload.delta as string | undefined;
+
+      if (
+        (e.kind === 'AssistantMessage' || e.kind === 'AgentThinking') &&
+        currentDelta !== undefined
+      ) {
+        if (
+          last &&
+          last.kind === e.kind &&
+          last.parent_event_id === e.parent_event_id &&
+          last.actor === e.actor
+        ) {
+          const prevText = (last.payload.text as string) || '';
+          last.payload.text = prevText + currentDelta;
+          continue;
+        }
+        payload.text = currentDelta;
+      }
+
+      result.push({ ...e, payload });
+    }
+    return result;
+  }, [events]);
   const hasInternalChatter = useMemo(
     () => events.some((e) => !CHAT_KINDS.has(e.kind) && e.kind !== 'NodeMaterialized'),
     [events],
   );
   const stillWorking = !closed && hasInternalChatter && transcript.length > 0;
+
+  const isAtBottom = useRef(true);
+
+  const handleScroll = () => {
+    if (!scrollRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
+    const threshold = 150;
+    isAtBottom.current = scrollHeight - scrollTop - clientHeight < threshold;
+  };
+
+  useEffect(() => {
+    if (isAtBottom.current) {
+      scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+    }
+  }, [transcript.length, transcript[transcript.length - 1]?.payload?.text]);
 
   if (!sessionId) {
     return (
@@ -122,7 +166,11 @@ export function AgentActivity({ sessionId }: Props) {
     <div className="flex-1 flex flex-col min-h-0 bg-bg">
       <Header session={session} connected={connected} closed={closed} />
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-5 space-y-4">
+      <div 
+        ref={scrollRef} 
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto px-5 py-5 space-y-4"
+      >
         {transcript.length === 0 && (
           <div className="flex items-center gap-2 text-[12px] text-fg-3">
             <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -238,6 +286,10 @@ function ChatRow(props: RowProps) {
       return <Bubble side="left" text="Session closed." />;
     case 'Error':
       return <Bubble side="left" text={`Error: ${event.payload.error ?? ''}`} />;
+    case 'AgentThinking':
+      return <ThinkingRow event={event} />;
+    case 'AgentPlanning':
+      return <PlanningRow event={event} />;
     default:
       return null;
   }
@@ -247,18 +299,71 @@ function ChatRow(props: RowProps) {
 // ── Bubble ────────────────────────────────────────────────────────────────
 
 function Bubble({ side, text, children }: { side: 'left' | 'right'; text?: string; children?: React.ReactNode }) {
+  const cleanText = useMemo(() => {
+    if (!text) return text;
+    // Remove bold markers and format bullets
+    return text
+      .replace(/\*\*/g, '')
+      .replace(/^\* /gm, '• ')
+      .replace(/ \* /g, ' • ')
+      .replace(/\*/g, '')
+      .trim();
+  }, [text]);
+
   return (
     <div className={cn('flex', side === 'right' && 'justify-end')}>
       <div
         className={cn(
           'max-w-[88%] px-4 py-2.5 rounded-2xl text-[13px] leading-relaxed whitespace-pre-wrap break-words',
           side === 'right'
-            ? 'bg-fg text-bg rounded-br-sm'
-            : 'bg-bg-2 text-fg rounded-bl-sm border border-border',
+            ? 'bg-fg text-bg rounded-br-sm shadow-sm'
+            : 'bg-bg-2 text-fg rounded-bl-sm border border-border shadow-sm',
         )}
       >
-        {text}
+        {cleanText}
         {children}
+      </div>
+    </div>
+  );
+}
+
+
+// ── Internal phase rows ───────────────────────────────────────────────────
+
+function ThinkingRow({ event }: { event: AgentEvent }) {
+  const text = String(event.payload.text || '');
+  if (!text) return null;
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[85%] px-3 py-2 rounded-xl bg-bg-2/40 text-fg-2 text-[11px] border border-border/50 shadow-sm animate-in fade-in duration-500">
+        <div className="flex items-center gap-1.5 mb-1 text-fg-3 opacity-70">
+          <Brain className="w-3.5 h-3.5" />
+          <span className="uppercase tracking-widest font-bold text-[9px]">Internal Monologue</span>
+        </div>
+        <div className="leading-normal italic opacity-90 whitespace-pre-wrap">{text}</div>
+      </div>
+    </div>
+  );
+}
+
+function PlanningRow({ event }: { event: AgentEvent }) {
+  const steps = (event.payload.steps as string[]) || [];
+  const title = (event.payload.title as string) || 'Strategy Roadmap';
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[85%] space-y-2.5 px-3.5 py-3 rounded-xl bg-bg-2/20 border border-dashed border-border shadow-sm animate-in fade-in slide-in-from-left-1 duration-500">
+        <div className="flex items-center gap-1.5 text-fg-3 opacity-70">
+          <ClipboardList className="w-3.5 h-3.5" />
+          <span className="uppercase tracking-widest font-bold text-[9px]">{title}</span>
+        </div>
+        <ul className="space-y-1.5">
+          {steps.map((s, i) => (
+            <li key={i} className="text-[12px] text-fg flex gap-2.5 leading-snug">
+              <span className="text-fg-3 font-mono text-[10px] mt-0.5">{String(i + 1).padStart(2, '0')}</span>
+              <span>{s}</span>
+            </li>
+          ))}
+        </ul>
       </div>
     </div>
   );

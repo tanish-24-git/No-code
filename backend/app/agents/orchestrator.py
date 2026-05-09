@@ -59,7 +59,7 @@ class OrchestratorAgent(BaseAgent):
 
         if mode == "full_agent" and provider and model:
             mode_note = (
-                f"Connected to **{provider} / {model}** in {probe.get('latency_ms', 0):.0f} ms - "
+                f"Connected to {provider} / {model} in {probe.get('latency_ms', 0):.0f} ms - "
                 "running in full agent mode."
             )
         else:
@@ -77,6 +77,7 @@ class OrchestratorAgent(BaseAgent):
             parent=event.id,
         )
 
+
         # In full-agent mode, ask the LLM for a custom plan; fall back to the
         # static plan if anything goes wrong.
         steps = _OPENING_PLAN
@@ -86,7 +87,7 @@ class OrchestratorAgent(BaseAgent):
             try:
                 plan_text = await self.call_llm(
                     session_id,
-                    f"Plan the fine-tuning session for dataset {ds_id}.",
+                    f"Plan the fine-tuning session for dataset {ds_id}. Provide 6-8 clear steps.",
                     system=_PLAN_SYSTEM_PROMPT,
                     stream_thoughts=False,
                     parent=event.id,
@@ -99,18 +100,27 @@ class OrchestratorAgent(BaseAgent):
             except Exception:
                 steps = _OPENING_PLAN
 
-        await self.emit(
-            "PhasePlanProposed",
+        await self.announce(
             session_id,
-            payload={
-                "phase": "intake",
-                "title": "Master plan",
-                "summary": "Here is everything I plan to do for this session.",
-                "plan_markdown": _master_plan_md(steps, mode),
-                "steps": steps,
-                "requires_approval": False,
-            },
-            parent_event_id=event.id,
+            phase="plan",
+            title="Master plan",
+            summary="I have drafted a custom execution plan for this dataset. Please review and approve.",
+            steps=steps,
+            requires_approval=True,
+            parent=event.id,
+        )
+
+        # Wait for user to approve the master plan.
+        comment = await self.wait_for_approval(session_id, "plan")
+        if comment:
+            await self.think(session_id, f"User added a note to the master plan: {comment}")
+            # In a more advanced version, we would re-generate the plan here.
+
+        await self.complete(
+            session_id,
+            phase="plan",
+            summary="Master plan approved. Starting the cascade.",
+            parent=event.id,
         )
 
     async def _audit_override(self, event: AgentEvent) -> None:
@@ -118,7 +128,7 @@ class OrchestratorAgent(BaseAgent):
         p = event.payload or {}
         await self.emit_message(
             event.session_id,
-            f"**Audit override** - {p.get('summary', 'a critical concern was raised')}.\n\n"
+            f"Audit override - {p.get('summary', 'a critical concern was raised')}.\n\n"
             f"Recommendation: {p.get('advice', 'review the agent activity log')}.",
             parent=event.id,
         )

@@ -11,7 +11,7 @@ class HardwareAnalysisAgent(BaseAgent):
     name = "HardwareAnalysisAgent"
     role = "Detect device/VRAM/CPU and recommend training method bounds"
     allowed_tools = ("hardware.detect", "hardware.estimate_throughput", "audit.write")
-    triggers = ("DatasetUploaded",)
+    triggers = ("DatasetProfileCompleted",)
 
     async def handle(self, event: AgentEvent) -> None:
         session_id = event.session_id
@@ -22,8 +22,14 @@ class HardwareAnalysisAgent(BaseAgent):
             summary="Detecting device, VRAM, CUDA / MPS support, and recommending bounds.",
             steps=["torch.cuda + torch.backends.mps probe", "VRAM total / free", "throughput estimate"],
             outputs=["hardware artifact"],
+            requires_approval=True,
             parent=event.id,
         )
+
+        comment = await self.wait_for_approval(session_id, "hardware")
+        if comment:
+            await self.think(session_id, f"User hardware feedback: {comment}")
+
         await self.emit("HardwareProfileStarted", session_id)
         await self.think(
             session_id,

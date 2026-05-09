@@ -37,14 +37,26 @@ class DatasetProfilingAgent(BaseAgent):
                 "Low-cardinality column class balance",
             ],
             outputs=["profile artifact (tokens, duplicates, missing, imbalance)"],
+            requires_approval=True,
             parent=event.id,
         )
+
         await self.materialize_node(
             session_id,
             {"id": "preprocess", "type": "preprocess", "position": {"x": 360, "y": 80},
              "data": {"label": "profile + clean"}},
             parent=event.id,
         )
+        await self.materialize_edge(
+            session_id,
+            {"id": "e-dataset-preprocess", "source": "dataset", "target": "preprocess", "animated": True},
+            parent=event.id,
+        )
+
+        comment = await self.wait_for_approval(session_id, "profile")
+        if comment:
+            await self.think(session_id, f"User profiling feedback: {comment}")
+
         await self.emit("DatasetProfileStarted", session_id, payload={"dataset_id": dataset_id})
 
         tokens = await self.call_tool("dataset.profile_tokens", {"dataset_id": dataset_id}, session_id)
