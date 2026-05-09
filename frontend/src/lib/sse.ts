@@ -54,6 +54,8 @@ export function useSessionEvents(sessionId: string | null | undefined) {
       'TrainingCompleted', 'EvaluationStarted', 'EvaluationCompleted',
       'ExportChoiceRequested', 'SaveLocalRequested', 'PushToHFRequested',
       'ExportCompleted',
+      'PhaseStarted', 'PhaseCompleted', 'PhasePlanProposed', 'PhaseApproved', 'PhaseCommented',
+      'NodeMaterialized',
       'AssistantMessage', 'UserMessage',
       'AgentToolCalled', 'AgentDecisionRecorded', 'Error',
     ];

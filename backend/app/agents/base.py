@@ -6,7 +6,11 @@ An agent's life:
     3. Agent calls tools.
     4. Agent emits new events (which schedule other agents).
 
-Agents never call other agents directly — coupling is via the bus.
+Agents never call other agents directly - coupling is via the bus.
+
+Phase narration (Antigravity-style): each agent calls ``announce_phase``
+before doing work and ``complete_phase`` after. The frontend uses these
+events to drive its node materialization and chat bubbles.
 """
 from __future__ import annotations
 
@@ -16,6 +20,12 @@ from typing import Any, Optional
 from app.events.bus import EventBus
 from app.events.types import AgentEvent, EventKind
 from app.services import session_service
+from app.services.phase_service import (
+    PhasePlan,
+    announce_node,
+    announce_phase,
+    complete_phase,
+)
 from app.tools.registry import ToolContext, run_tool
 
 
@@ -80,3 +90,72 @@ class BaseAgent:
 
     def get_session(self, session_id: str):
         return session_service.get(session_id)
+
+    # ── Phase narration ────────────────────────────────────────────────────
+
+    async def announce(
+        self,
+        session_id: str,
+        *,
+        phase: str,
+        title: str,
+        summary: str,
+        steps: list[str] | None = None,
+        inputs: dict[str, Any] | None = None,
+        outputs: list[str] | None = None,
+        requires_approval: bool = False,
+        parent: Optional[str] = None,
+    ) -> None:
+        """Surface a phase plan to the user (chat bubble + node hint)."""
+        plan = PhasePlan(
+            phase=phase,
+            title=title,
+            summary=summary,
+            steps=steps or [],
+            inputs=inputs or {},
+            outputs=outputs or [],
+            requires_approval=requires_approval,
+        )
+        await announce_phase(
+            self.bus,
+            session_id=session_id,
+            actor=self.name,
+            phase=phase,
+            plan=plan,
+            parent_event_id=parent,
+        )
+
+    async def materialize_node(
+        self,
+        session_id: str,
+        node: dict[str, Any],
+        *,
+        parent: Optional[str] = None,
+    ) -> None:
+        """Tell the canvas to pop a node into existence right now."""
+        await announce_node(
+            self.bus,
+            session_id=session_id,
+            actor=self.name,
+            node=node,
+            parent_event_id=parent,
+        )
+
+    async def complete(
+        self,
+        session_id: str,
+        *,
+        phase: str,
+        summary: str,
+        artifacts: Optional[dict[str, Any]] = None,
+        parent: Optional[str] = None,
+    ) -> None:
+        await complete_phase(
+            self.bus,
+            session_id=session_id,
+            actor=self.name,
+            phase=phase,
+            summary=summary,
+            artifacts=artifacts,
+            parent_event_id=parent,
+        )

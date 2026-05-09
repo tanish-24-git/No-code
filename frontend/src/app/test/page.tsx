@@ -351,7 +351,7 @@ function Chat({ model, disabled }: { model: ModelRecord; disabled: boolean }) {
         )}
       </div>
       <div className="px-5 py-1.5 text-[9px] uppercase tracking-widest text-white/30 font-black bg-[#050505] border-t border-white/5">
-        ⌘/Ctrl + Enter to send · responses are role-played by your configured LLM provider
+        Ctrl + Enter to send. Replies come from the trained adapter when available; otherwise the configured LLM provider answers.
       </div>
     </div>
   );

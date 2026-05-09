@@ -23,6 +23,21 @@ class EvaluationAgent(BaseAgent):
         if session.state == FSMState.MONITORING:
             session_service.advance_state(session, FSMState.EVALUATING, reason="evaluating output")
 
+        await self.announce(
+            session_id,
+            phase="evaluate",
+            title="Evaluating the trained model",
+            summary="Running the basic eval suite and comparing to the baseline.",
+            steps=["Load held-out validation slice", "Compute final loss + score", "Delta vs. baseline"],
+            outputs=["evaluation artifact"],
+            parent=event.id,
+        )
+        await self.materialize_node(
+            session_id,
+            {"id": "evaluate", "type": "evaluate", "position": {"x": 1380, "y": 80},
+             "data": {"label": "evaluate"}},
+            parent=event.id,
+        )
         await self.emit("EvaluationStarted", session_id, payload={"job_id": session.job_id})
 
         result = await self.call_tool("eval.run_suite", {"job_id": session.job_id, "suite": "basic"}, session_id)
@@ -39,6 +54,13 @@ class EvaluationAgent(BaseAgent):
             session_id,
             f"Evaluation: final loss {result.get('final_loss')}, score "
             f"{result.get('score')}; baseline delta {compare.get('delta')}.",
+            parent=event.id,
+        )
+        await self.complete(
+            session_id,
+            phase="evaluate",
+            summary=f"score {result.get('score')}, baseline delta {compare.get('delta')}",
+            artifacts={"score": result.get("score")},
             parent=event.id,
         )
         await self.emit(

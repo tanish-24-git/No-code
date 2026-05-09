@@ -24,6 +24,25 @@ class TrainingStrategyAgent(BaseAgent):
         chosen_model = session.artifacts.get("chosen_model") or {}
         priority = self._user_priority(session) or "quality"
 
+        await self.announce(
+            session_id,
+            phase="strategy",
+            title="Picking a training strategy",
+            summary=(
+                f"Choosing PEFT method, precision, batch size, and seq length "
+                f"for {chosen_model.get('repo_id', 'the chosen model')} on "
+                f"{hw.get('device', 'cpu').upper()}."
+            ),
+            steps=[
+                "Pick LoRA / QLoRA / DoRA based on VRAM headroom",
+                "Set bf16 / fp16 / fp32 by device support",
+                "Compute batch * grad_accum to fit VRAM",
+                "Estimate runtime",
+            ],
+            outputs=["strategy artifact", "runtime_estimate"],
+            parent=event.id,
+        )
+
         strategy = await self.call_tool(
             "strategy.choose",
             {"model": chosen_model, "hardware": hw, "profile": profile, "task": task, "priority": priority},
@@ -62,6 +81,14 @@ class TrainingStrategyAgent(BaseAgent):
             parent=event.id,
         )
 
+        await self.complete(
+            session_id,
+            phase="strategy",
+            summary=f"{strategy['method']} / {strategy['precision']} / "
+                    f"~{est_min:.1f} min estimated",
+            artifacts={"method": strategy["method"], "precision": strategy["precision"]},
+            parent=event.id,
+        )
         await self.emit(
             "StrategyChosen",
             session_id,

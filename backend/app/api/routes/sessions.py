@@ -21,6 +21,7 @@ from typing import AsyncIterator
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from app.api.schemas.session import (
     AgentSession,
@@ -205,6 +206,39 @@ async def submit_retry(session_id: str, payload: RetryDecision) -> dict:
     await bus.publish(AgentEvent(
         session_id=session_id, kind=kind, actor="user",
         payload={"diff_id": payload.diff_id, "reason": payload.reason},
+    ))
+    return {"ok": True}
+
+
+@router.post("/api/sessions/{session_id}/phase/{phase}/approve")
+async def approve_phase(session_id: str, phase: str) -> dict:
+    """User clicked Approve on a phase plan card. Lets the agent proceed."""
+    s = session_service.get(session_id)
+    if not s:
+        raise HTTPException(404, "Session not found")
+    bus = get_bus()
+    await bus.publish(AgentEvent(
+        session_id=session_id, kind="PhaseApproved", actor="user",
+        payload={"phase": phase},
+    ))
+    return {"ok": True}
+
+
+class PhaseComment(BaseModel):
+    text: str
+
+
+@router.post("/api/sessions/{session_id}/phase/{phase}/comment")
+async def comment_phase(session_id: str, phase: str, payload: PhaseComment) -> dict:
+    """User typed a comment under a phase plan card. The agent will read it
+    on the blackboard and adjust before continuing."""
+    s = session_service.get(session_id)
+    if not s:
+        raise HTTPException(404, "Session not found")
+    bus = get_bus()
+    await bus.publish(AgentEvent(
+        session_id=session_id, kind="PhaseCommented", actor="user",
+        payload={"phase": phase, "text": payload.text},
     ))
     return {"ok": True}
 

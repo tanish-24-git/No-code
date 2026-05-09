@@ -39,14 +39,19 @@ CATALOG: list[BaseModelSpec] = [
 
 @tool(
     name="model.rank_candidates",
-    description="Rank base models for a given (hardware, dataset profile, task) joint context. Pure scoring.",
+    description=(
+        "Rank base models for a given (hardware, dataset profile, task) joint "
+        "context. If `shortlist` is provided, ranks those models; otherwise "
+        "ranks the curated catalogue."
+    ),
     input_schema={
         "type": "object",
         "properties": {
-            "hardware": {"type": "object"},
-            "profile":  {"type": "object"},
-            "task":     {"type": "object"},
-            "top_n":    {"type": "integer", "default": 5},
+            "hardware":  {"type": "object"},
+            "profile":   {"type": "object"},
+            "task":      {"type": "object"},
+            "top_n":     {"type": "integer", "default": 5},
+            "shortlist": {"type": "array"},
         },
         "required": ["hardware", "profile", "task"],
     },
@@ -56,9 +61,27 @@ async def model_rank_candidates(args: dict[str, Any], _ctx: ToolContext) -> dict
     pr = args["profile"] or {}
     tk = args["task"] or {}
     n = int(args.get("top_n", 5))
+    shortlist = args.get("shortlist") or None
+
+    pool: list[BaseModelSpec] = []
+    if shortlist:
+        for c in shortlist:
+            pool.append(BaseModelSpec(
+                repo_id=c.get("repo_id", ""),
+                label=c.get("label") or c.get("repo_id", ""),
+                params_b=float(c.get("params_b") or 0.0),
+                max_pos=int(c.get("max_pos") or 4096),
+                has_chat_template=True,            # search filtered to instruct-tuned
+                family=_infer_family(c.get("repo_id", "")),
+                domain_tags=tuple(c.get("tags") or ()),
+            ))
+    else:
+        pool = list(CATALOG)
 
     rows: list[dict[str, Any]] = []
-    for m in CATALOG:
+    for m in pool:
+        if not m.repo_id:
+            continue
         s = _score(m, hw, pr, tk)
         rows.append({
             "repo_id": m.repo_id,
@@ -72,7 +95,24 @@ async def model_rank_candidates(args: dict[str, Any], _ctx: ToolContext) -> dict
             "method": s["method"],
         })
     rows.sort(key=lambda r: r["score"], reverse=True)
-    return {"candidates": rows[:n], "considered": len(CATALOG)}
+    return {"candidates": rows[:n], "considered": len(pool)}
+
+
+def _infer_family(repo_id: str) -> str:
+    rid = repo_id.lower()
+    if "llama" in rid:
+        return "llama"
+    if "qwen" in rid:
+        return "qwen"
+    if "phi" in rid:
+        return "phi"
+    if "gemma" in rid:
+        return "gemma"
+    if "mistral" in rid:
+        return "mistral"
+    if "smollm" in rid:
+        return "smollm"
+    return "other"
 
 
 @tool(

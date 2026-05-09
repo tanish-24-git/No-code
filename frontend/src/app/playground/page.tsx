@@ -19,6 +19,7 @@ import type {
 } from '@/lib/types';
 import { AgentActivity } from '@/components/AgentActivity';
 import { PipelineCanvas } from '@/components/PipelineCanvas';
+import { useSessionEvents } from '@/lib/sse';
 import { cn } from '@/lib/cn';
 import {
   Database,
@@ -74,6 +75,9 @@ export default function PlaygroundPage() {
     fetcher,
     { refreshInterval: 2500 },
   );
+
+  // Live event stream feeds the canvas so nodes pop in phase-by-phase.
+  const { events: sessionEvents } = useSessionEvents(activeSessionId);
 
   const { data: dataset } = useSWR<Dataset>(
     session?.dataset_id ? `/api/datasets/${session.dataset_id}` : null,
@@ -242,21 +246,13 @@ export default function PlaygroundPage() {
         </header>
 
         <div className="flex-1 relative">
-          {pipeline ? (
+          {session ? (
             <PipelineCanvas
               pipeline={pipeline}
+              events={sessionEvents}
               onGraphChange={() => {}}
               onSelectNode={() => {}}
             />
-          ) : session ? (
-            <div className="h-full flex items-center justify-center">
-              <div className="text-center space-y-2">
-                <Loader2 className="w-5 h-5 text-white/30 mx-auto animate-spin" />
-                <p className="text-[10px] uppercase tracking-[0.3em] text-white/30 font-black">
-                  Agent is drafting your pipeline…
-                </p>
-              </div>
-            </div>
           ) : (
             <EmptyState />
           )}

@@ -36,6 +36,10 @@ EventKind = Literal[
     "ExportChoiceRequested",
     "SaveLocalRequested", "PushToHFRequested",
     "ExportCompleted",
+    # Phase narration (Antigravity-style per-phase plan + approval)
+    "PhaseStarted", "PhaseCompleted",
+    "PhasePlanProposed", "PhaseApproved", "PhaseCommented",
+    "NodeMaterialized",          # canvas should pop a node into existence
     # Conversational + audit
     "AssistantMessage",         # what the chat panel renders as a chat bubble
     "UserMessage",              # free-text from the user
