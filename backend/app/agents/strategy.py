@@ -60,7 +60,7 @@ class TrainingStrategyAgent(BaseAgent):
         est_min = float(runtime.get("estimated_minutes", 0.0))
 
         session_service.attach_artifact(session, "strategy", strategy)
-        session_service.attach_artifact(session, "runtime_estimate", runtime)
+        session_service.attach_artifact(session, "runtime_estimate", {"estimated_minutes": est_min})
 
         d = decision_log.record(
             session_id=session_id,
@@ -72,10 +72,20 @@ class TrainingStrategyAgent(BaseAgent):
             rationale=f"priority={priority}",
         )
 
+        # Plan card with the SOTA stack so the user sees DoRA/GaLore/Unsloth.
+        stack_bits = [strategy["method"]]
+        if strategy.get("adapter_variant") and strategy["adapter_variant"] != "none":
+            stack_bits.append(f"+{strategy['adapter_variant'].upper()}")
+        if strategy.get("kernel_pack") and strategy["kernel_pack"] != "standard":
+            stack_bits.append(f"-{strategy['kernel_pack']}")
+        if strategy.get("quantization") and strategy["quantization"] != "none":
+            stack_bits.append(f"-{strategy['quantization']}")
+        stack = " ".join(stack_bits)
+
         await self.emit_message(
             session_id,
-            f"Strategy: {strategy['method']} / {strategy['precision']} / "
-            f"batch {strategy['batch_size']}×{strategy['gradient_accumulation']} grad accum / "
+            f"Strategy: **{stack}** / {strategy['precision']} / "
+            f"batch {strategy['batch_size']}x{strategy['gradient_accumulation']} grad accum / "
             f"seq {strategy['max_seq_len']} / {strategy['epochs']}ep. "
             f"~{est_min:.1f} min estimated.",
             parent=event.id,

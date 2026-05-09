@@ -273,6 +273,31 @@ def session_audit(session_id: str) -> dict:
     }
 
 
+@router.get("/api/sessions/{session_id}/blackboard")
+def session_blackboard(session_id: str) -> dict:
+    """Federated Blackboard contents — thoughts, plans, questions,
+    critiques, decisions, nodes. Powers the Cognition tab in the UI."""
+    s = session_service.get(session_id)
+    if not s:
+        raise HTTPException(404, "Session not found")
+    from app.services.blackboard import get_blackboard
+
+    bb = get_blackboard().read(session_id)
+    return {"session_id": session_id, "blackboard": bb}
+
+
+@router.get("/api/sessions/{session_id}/checkpoint")
+def session_checkpoint(session_id: str) -> dict:
+    """Latest persisted checkpoint snapshot for crash-recovery debugging."""
+    s = session_service.get(session_id)
+    if not s:
+        raise HTTPException(404, "Session not found")
+    from app.services.checkpoint import get_checkpoint_store
+
+    snap = get_checkpoint_store().load(session_id)
+    return {"session_id": session_id, "checkpoint": snap}
+
+
 # Tool introspection — used by the UI's debug panel.
 
 tools_router = APIRouter(tags=["tools"])

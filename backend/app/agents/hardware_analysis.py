@@ -25,6 +25,13 @@ class HardwareAnalysisAgent(BaseAgent):
             parent=event.id,
         )
         await self.emit("HardwareProfileStarted", session_id)
+        await self.think(
+            session_id,
+            "Probing local hardware — torch availability, CUDA / MPS, VRAM, and "
+            "approximate tokens-per-second so I can scope the model search to "
+            "what your machine can actually run.",
+            parent=event.id,
+        )
         info = await self.call_tool("hardware.detect", {}, session_id)
 
         session = self.get_session(session_id)

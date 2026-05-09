@@ -15,6 +15,7 @@ from app.api.schemas.session import (
     FSMState,
     SessionListItem,
 )
+from app.services import dataset_service
 from app.storage import store
 
 
@@ -81,8 +82,15 @@ def get_by_dataset(dataset_id: str) -> Optional[AgentSession]:
 def start_for_dataset(dataset_id: str) -> AgentSession:
     sid = store.new_id()
     now = _now()
+    
+    # Try to get a meaningful name from the dataset
+    name = "New Session"
+    ds = dataset_service.get_dataset(dataset_id)
+    if ds:
+        name = f"Session: {ds.name}"
+
     s = AgentSession(
-        id=sid, dataset_id=dataset_id,
+        id=sid, name=name, dataset_id=dataset_id,
         state=FSMState.INIT, state_entered_at=now,
         created_at=now, updated_at=now,
     )

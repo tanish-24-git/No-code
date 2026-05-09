@@ -166,7 +166,7 @@ class PipelineBuilderAgent(BaseAgent):
             "precision": f"{strategy.get('precision')} per device support",
             "max_seq_len": f"clipped to dataset p95 ({profile.get('p95')}) and model.max_pos",
             "epochs": f"{strategy.get('epochs')} balances dataset size vs runtime",
-            "batch_size": f"{strategy.get('batch_size')}×{strategy.get('gradient_accumulation')} fits VRAM budget",
+            "batch_size": f"{strategy.get('batch_size')}x{strategy.get('gradient_accumulation')} fits VRAM budget",
         }
 
     def _build_graph(self, dataset_id, profile, strategy):

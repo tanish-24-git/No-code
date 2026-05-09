@@ -1,6 +1,25 @@
 import Link from 'next/link';
 import { cn } from '@/lib/cn';
-import { Database, Wand2, Cpu, BarChart3, Github, Zap, Shield, Cpu as Chip, Layout, Box, GitBranch } from 'lucide-react';
+import {
+  Database,
+  Wand2,
+  Cpu,
+  BarChart3,
+  Github,
+  Zap,
+  Shield,
+  Cpu as Chip,
+  Layout,
+  Box,
+  GitBranch,
+  Brain,
+  ListChecks,
+  HelpCircle,
+  Sparkles,
+  Play,
+  Eye,
+  ShieldCheck,
+} from 'lucide-react';
 import { Nav } from '@/components/Nav';
 import HeroFlow from '@/components/HeroFlow';
 
@@ -15,16 +34,44 @@ export default function HomePage() {
         <div className="mb-24 animate-fade-in max-w-4xl flex flex-col items-center">
           <div className="flex items-center gap-3 mb-8">
             <div className="px-3 py-1 bg-white/5 border border-white/10 rounded flex items-center gap-2">
-              <span className="text-[10px] font-black tracking-[0.2em] uppercase text-white/40">Build Version 2.0</span>
+              <span className="text-[10px] font-black tracking-[0.2em] uppercase text-white/40">Build · v3 · Autonomous Hive</span>
             </div>
           </div>
           <h1 className="text-6xl md:text-9xl font-bold tracking-tight mb-10 leading-[1.0] text-white">
-            Fine-tuning Studio.
+            Crap data → fortune weights.
           </h1>
-          <p className="text-white/40 text-xl max-w-2xl leading-relaxed font-light">
-            The ultimate no-code studio for specialized intelligence. 
-            Automate datasets, optimize tokenization, and deploy high-performance models in minutes.
+          <p className="text-white/50 text-xl max-w-3xl leading-relaxed font-light">
+            FineTune Studio is an open-source agentic studio for LLM fine-tuning. 19 specialized
+            agents profile your data, probe your hardware, ask Socratic questions, draft a
+            DoRA · GaLore · Unsloth pipeline, train it, recover from failure, and benchmark in a
+            sandbox — all live-streamed, all in one prompt.
           </p>
+
+          {/* Live "thought stream" sample */}
+          <div className="mt-10 max-w-2xl w-full text-left rounded-lg border border-white/10 bg-white/[0.02] backdrop-blur-md p-5 space-y-2 font-mono text-[12px]">
+            <ThoughtLine tone="thinking"   icon={Brain}      text="Probing hardware — 12GB VRAM, no MPS, CUDA 12.4." />
+            <ThoughtLine tone="planning"   icon={ListChecks} text="1. Profile  2. Health-check  3. Rank models  4. Train" />
+            <ThoughtLine tone="asking"     icon={HelpCircle} text="I see 30% duplicates. Merge or treat as separate domains?" />
+            <ThoughtLine tone="garnishing" icon={Sparkles}   text="popping `train` node onto the canvas…" />
+            <ThoughtLine tone="executing"  icon={Play}       text="step 240/720 · loss 1.7841 · 4.2 tok/ms" />
+          </div>
+
+          <div className="mt-8 flex items-center gap-3">
+            <Link
+              href="/playground"
+              className="px-6 py-3 bg-white text-black rounded text-[11px] font-black uppercase tracking-[0.2em] hover:bg-white/90 transition"
+            >
+              Launch playground →
+            </Link>
+            <a
+              href="https://github.com/tanish-24-git/finetune-studio"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-6 py-3 bg-transparent text-white border border-white/20 rounded text-[11px] font-black uppercase tracking-[0.2em] hover:bg-white/5 transition flex items-center gap-2"
+            >
+              <Github className="w-3.5 h-3.5" /> Star on GitHub
+            </a>
+          </div>
         </div>
 
         {/* Node-Based Workflow Visual (HeroFlow) */}
@@ -34,37 +81,46 @@ export default function HomePage() {
 
         {/* Project Context & Features */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-48">
-          <div className="group p-8 bg-white/[0.02] border border-white/5 rounded-xl hover:bg-white/[0.04] hover:border-white/20 transition-all duration-500">
-            <Layout className="w-10 h-10 text-white/60 mb-8 group-hover:scale-110 transition-transform" />
-            <h3 className="text-lg font-bold mb-4 uppercase tracking-widest text-white">Interactive Canvas</h3>
-            <p className="text-sm text-white/40 leading-relaxed">
-              Design complex training pipelines with a drag-and-drop interface. Connect datasets to preprocessors and models effortlessly.
-            </p>
-          </div>
-          
-          <div className="group p-8 bg-white/[0.02] border border-white/5 rounded-xl hover:bg-white/[0.04] hover:border-white/20 transition-all duration-500">
-            <Box className="w-10 h-10 text-white/60 mb-8 group-hover:scale-110 transition-transform" />
-            <h3 className="text-lg font-bold mb-4 uppercase tracking-widest text-white">Model Zoo</h3>
-            <p className="text-sm text-white/40 leading-relaxed">
-              Direct access to Llama-3, Mistral, and Gemma base weights. Pre-configured for LoRA, QLoRA, and full fine-tuning.
-            </p>
-          </div>
-
-          <div className="group p-8 bg-white/[0.02] border border-white/5 rounded-xl hover:bg-white/[0.04] hover:border-white/20 transition-all duration-500">
-            <GitBranch className="w-10 h-10 text-white/60 mb-8 group-hover:scale-110 transition-transform" />
-            <h3 className="text-lg font-bold mb-4 uppercase tracking-widest text-white">Versioning</h3>
-            <p className="text-sm text-white/40 leading-relaxed">
-              Automatically track every training run, dataset version, and hyperparameter configuration for full reproducibility.
-            </p>
-          </div>
-
-          <div className="group p-8 bg-white/[0.02] border border-white/5 rounded-xl hover:bg-white/[0.04] hover:border-white/20 transition-all duration-500">
-            <Shield className="w-10 h-10 text-white/60 mb-8 group-hover:scale-110 transition-transform" />
-            <h3 className="text-lg font-bold mb-4 uppercase tracking-widest text-white">Compliance</h3>
-            <p className="text-sm text-white/40 leading-relaxed">
-              Built-in safety filters and alignment monitoring to ensure your specialized models remain helpful and harmless.
-            </p>
-          </div>
+          <FeatureCard
+            icon={<Brain className="w-10 h-10 text-thinking/80" />}
+            title="19-agent swarm"
+            body="Hierarchical hive — Orchestrator, Data Alchemist, Architect, Audit Critic, Sandbox. Federated blackboard. Event bus. Loop-safe."
+          />
+          <FeatureCard
+            icon={<Sparkles className="w-10 h-10 text-garnishing/80" />}
+            title="Socratic streaming"
+            body="Five colour-coded tones — thinking · planning · asking · garnishing · executing — make every decision auditable in real time."
+          />
+          <FeatureCard
+            icon={<Cpu className="w-10 h-10 text-info/80" />}
+            title="SOTA-2026 stack"
+            body="DoRA, GaLore, Unsloth fused kernels, QLoRA-int4, DPO/ORPO alignment. Picked dynamically, with rationale."
+          />
+          <FeatureCard
+            icon={<ShieldCheck className="w-10 h-10 text-warn/80" />}
+            title="Audit Critic"
+            body="An independent reviewer vetoes risky plans. Veto surfaces in the UI for explicit user resolution before any compute is spent."
+          />
+          <FeatureCard
+            icon={<Zap className="w-10 h-10 text-success/80" />}
+            title="TAO recovery"
+            body="L1 retry, L2 adapt (OOM / NaN / divergence), L3 escalate. Crashes don't end the run — they trigger a plan diff with confidence scores."
+          />
+          <FeatureCard
+            icon={<Eye className="w-10 h-10 text-success/80" />}
+            title="Clean-room sandbox"
+            body="Post-training MMLU / GSM8K / HumanEval lite benchmarks in an isolated process — no leaked context."
+          />
+          <FeatureCard
+            icon={<Database className="w-10 h-10 text-white/60" />}
+            title="Universal data alchemy"
+            body="Recursive folder scan, schema induction, semantic dedup, sensitive-info redaction (emails / keys / PII), low-entropy filter."
+          />
+          <FeatureCard
+            icon={<Shield className="w-10 h-10 text-white/60" />}
+            title="Local-first, no telemetry"
+            body="Pure FastAPI + Next.js. JSON on disk. 17 LLM providers — pick one, paste a key. Encrypted at rest."
+          />
         </div>
 
         {/* Detailed Workflow (Text-based Deep Dive) */}
@@ -117,6 +173,45 @@ export default function HomePage() {
           </a>
         </div>
       </footer>
+    </div>
+  );
+}
+
+function ThoughtLine({
+  tone,
+  icon: Icon,
+  text,
+}: {
+  tone: 'thinking' | 'planning' | 'asking' | 'garnishing' | 'executing';
+  icon: React.ComponentType<{ className?: string }>;
+  text: string;
+}) {
+  const colorMap: Record<string, { dot: string; chip: string; text: string }> = {
+    thinking:   { dot: 'bg-thinking',   chip: 'bg-thinking/15 text-thinking',     text: 'text-white/80 italic' },
+    planning:   { dot: 'bg-planning',   chip: 'bg-planning/15 text-planning',     text: 'text-white/80' },
+    asking:     { dot: 'bg-asking',     chip: 'bg-asking/15 text-asking',         text: 'text-white' },
+    garnishing: { dot: 'bg-garnishing', chip: 'bg-garnishing/15 text-garnishing', text: 'text-white/85' },
+    executing:  { dot: 'bg-executing',  chip: 'bg-executing/15 text-executing',   text: 'text-white/80' },
+  };
+  const s = colorMap[tone];
+  return (
+    <div className="flex items-center gap-3">
+      <span className={cn('w-1.5 h-1.5 rounded-full shrink-0', s.dot)} />
+      <span className={cn('px-1.5 py-0.5 rounded text-[8.5px] font-black uppercase tracking-[0.18em]', s.chip)}>
+        [{tone}]
+      </span>
+      <Icon className="w-3 h-3 text-white/40 shrink-0" />
+      <span className={cn('text-[12px]', s.text)}>{text}</span>
+    </div>
+  );
+}
+
+function FeatureCard({ icon, title, body }: { icon: React.ReactNode; title: string; body: string }) {
+  return (
+    <div className="group p-8 bg-white/[0.02] border border-white/5 rounded-xl hover:bg-white/[0.04] hover:border-white/20 transition-all duration-500">
+      <div className="mb-8 group-hover:scale-110 transition-transform">{icon}</div>
+      <h3 className="text-lg font-bold mb-4 uppercase tracking-widest text-white">{title}</h3>
+      <p className="text-sm text-white/50 leading-relaxed">{body}</p>
     </div>
   );
 }

@@ -1,10 +1,18 @@
 """OrchestratorAgent: opens the session, broadcasts the master plan, and
-posts the first user-visible message.
+handles audit overrides.
 
 It is the only agent that runs synchronously inside the upload request
 handler - everything else is event-driven from the bus.
+
+When the LLM probe at session start succeeded ("full_agent" mode), the
+orchestrator can ask the configured provider for a custom plan. When the
+probe failed ("deterministic" mode), it falls back to the static plan
+below so the user still gets a roadmap.
 """
 from __future__ import annotations
+
+import json
+import re
 
 from app.agents.base import BaseAgent
 from app.events.types import AgentEvent
@@ -21,14 +29,28 @@ _OPENING_PLAN = [
     "Save locally or push to HF on your command",
 ]
 
+_PLAN_SYSTEM_PROMPT = (
+    "You are the lead orchestrator for FineTune Studio. Generate a concrete "
+    "6-8 step execution plan for the user's fine-tuning session covering: "
+    "data alchemy, hardware analysis, task inference, model search, strategy, "
+    "pipeline construction, training, evaluation, and export. "
+    "Return ONLY a JSON array of short strings."
+)
+
 
 class OrchestratorAgent(BaseAgent):
     name = "OrchestratorAgent"
     role = "Voice of the studio. Greets and broadcasts the master plan."
     allowed_tools = ()
-    triggers = ("SessionStarted",)
+    triggers = ("SessionStarted", "AuditOverride")
 
     async def handle(self, event: AgentEvent) -> None:
+        if event.kind == "SessionStarted":
+            await self._open(event)
+        elif event.kind == "AuditOverride":
+            await self._audit_override(event)
+
+    async def _open(self, event: AgentEvent) -> None:
         session_id = event.session_id
         probe = (event.payload or {}).get("llm_probe") or {}
         mode = probe.get("mode", "deterministic")
@@ -54,6 +76,29 @@ class OrchestratorAgent(BaseAgent):
             "approval on the critical ones.\n\n" + mode_note,
             parent=event.id,
         )
+
+        # In full-agent mode, ask the LLM for a custom plan; fall back to the
+        # static plan if anything goes wrong.
+        steps = _OPENING_PLAN
+        if mode == "full_agent":
+            session = self.get_session(session_id)
+            ds_id = session.dataset_id if session else "this dataset"
+            try:
+                plan_text = await self.call_llm(
+                    session_id,
+                    f"Plan the fine-tuning session for dataset {ds_id}.",
+                    system=_PLAN_SYSTEM_PROMPT,
+                    stream_thoughts=False,
+                    parent=event.id,
+                )
+                m = re.search(r"\[.*\]", plan_text, re.DOTALL)
+                if m:
+                    parsed = json.loads(m.group(0))
+                    if isinstance(parsed, list) and parsed:
+                        steps = [str(s) for s in parsed][:10]
+            except Exception:
+                steps = _OPENING_PLAN
+
         await self.emit(
             "PhasePlanProposed",
             session_id,
@@ -61,11 +106,21 @@ class OrchestratorAgent(BaseAgent):
                 "phase": "intake",
                 "title": "Master plan",
                 "summary": "Here is everything I plan to do for this session.",
-                "plan_markdown": _master_plan_md(_OPENING_PLAN, mode),
-                "steps": _OPENING_PLAN,
+                "plan_markdown": _master_plan_md(steps, mode),
+                "steps": steps,
                 "requires_approval": False,
             },
             parent_event_id=event.id,
+        )
+
+    async def _audit_override(self, event: AgentEvent) -> None:
+        """The Critic vetoed something. Surface to the user immediately."""
+        p = event.payload or {}
+        await self.emit_message(
+            event.session_id,
+            f"**Audit override** - {p.get('summary', 'a critical concern was raised')}.\n\n"
+            f"Recommendation: {p.get('advice', 'review the agent activity log')}.",
+            parent=event.id,
         )
 
 

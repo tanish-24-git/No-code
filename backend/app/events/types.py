@@ -17,6 +17,7 @@ EventKind = Literal[
     "DatasetUploaded",
     "IntakeStarted", "IntakeCompleted",
     "DatasetProfileStarted", "DatasetProfileCompleted",
+    "DataHealthReport",          # Data Alchemist surfaces ‹crap-vs-fortune› verdict
     # Task inference & clarification
     "TaskInferenceStarted", "TaskInferred", "IntentConfidenceLow",
     "UserClarificationRequested", "UserClarificationReceived",
@@ -36,17 +37,37 @@ EventKind = Literal[
     "ExportChoiceRequested",
     "SaveLocalRequested", "PushToHFRequested",
     "ExportCompleted",
-    # Phase narration (Antigravity-style per-phase plan + approval)
+    # ── Phase narration (Antigravity-style per-phase plan + approval) ─────
     "PhaseStarted", "PhaseCompleted",
     "PhasePlanProposed", "PhaseApproved", "PhaseCommented",
     "NodeMaterialized",          # canvas should pop a node into existence
-    # Conversational + audit
+    # ── Streaming kinds (used by audit / sandbox / alchemy agents) ────────
+    # payload.stream is one of:
+    #   "thinking" / "planning" / "asking" / "garnishing" / "executing"
+    "AgentThinking",
+    "AgentPlanning",
+    "AgentAsking",
+    "AgentGarnishing",
+    "AgentExecuting",
+    # ── Hierarchy / collaboration ─────────────────────────────────────────
+    "BlackboardUpdated",        # any agent posts to the federated blackboard
+    "AuditCritique",            # Audit Agent (Critic) reviews a plan
+    "AuditOverride",            # Critic vetoed; user or master must resolve
+    "SandboxBenchmarkStarted",
+    "SandboxBenchmarkCompleted",
+    "CircuitBreakerTripped",    # too many loops detected on the same kind
+    "CheckpointSaved",          # session checkpoint persisted
+    # ── Conversational + audit ────────────────────────────────────────────
     "AssistantMessage",         # what the chat panel renders as a chat bubble
     "UserMessage",              # free-text from the user
     "AgentToolCalled",          # one entry per tool call, for the trace
     "AgentDecisionRecorded",    # references a decision_id in the audit log
     "Error",
 ]
+
+
+# Visual stream tone — mapped to UI colors per blueprint §11.
+StreamTone = Literal["thinking", "planning", "asking", "garnishing", "executing"]
 
 
 def _new_id() -> str:

@@ -115,6 +115,7 @@ class ModelSelectionAgent(BaseAgent):
             return
 
         chosen = candidates[0]
+
         session_service.attach_artifact(session, "candidate_models", candidates)
         session_service.attach_artifact(session, "chosen_model", chosen)
 
