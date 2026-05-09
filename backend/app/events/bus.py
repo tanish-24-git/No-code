@@ -74,6 +74,10 @@ class EventBus:
     def on(self, kind: EventKind, handler: Handler) -> None:
         self._handlers.setdefault(kind, []).append(handler)
 
+    def off(self, kind: EventKind, handler: Handler) -> None:
+        if kind in self._handlers and handler in self._handlers[kind]:
+            self._handlers[kind].remove(handler)
+
     def attach_sse(self, session_id: str, maxsize: int = 256) -> asyncio.Queue:
         q: asyncio.Queue[AgentEvent] = asyncio.Queue(maxsize=maxsize)
         self._sse.setdefault(session_id, []).append(q)

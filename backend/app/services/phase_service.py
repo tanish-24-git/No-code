@@ -52,9 +52,9 @@ PHASE_TO_NODE: dict[str, str] = {
     "profile":      "preprocess",
     "hardware":     "preprocess",
     "task":         "preprocess",
-    "model_search": "preprocess",
-    "strategy":     "preprocess",
-    "plan":         "preprocess",
+    "model_search": "model",
+    "strategy":     "strategy",
+    "plan":         "strategy",
     "audit":        "preprocess",
     "execute":      "train",
     "monitor":      "train",
@@ -142,6 +142,21 @@ async def announce_node(
     await bus.publish(AgentEvent(
         session_id=session_id, kind="NodeMaterialized", actor=actor,
         payload={"node": node}, parent_event_id=parent_event_id,
+    ))
+
+
+async def announce_edge(
+    bus: EventBus,
+    *,
+    session_id: str,
+    actor: str,
+    edge: dict[str, Any],
+    parent_event_id: Optional[str] = None,
+) -> None:
+    """Tell the canvas to draw a connection between two nodes."""
+    await bus.publish(AgentEvent(
+        session_id=session_id, kind="EdgeMaterialized", actor=actor,
+        payload={"edge": edge}, parent_event_id=parent_event_id,
     ))
 
 

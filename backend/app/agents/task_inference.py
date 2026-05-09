@@ -12,7 +12,7 @@ class TaskInferenceAgent(BaseAgent):
     name = "TaskInferenceAgent"
     role = "Infer task type from dataset signals; expose confidence."
     allowed_tools = ("task.classify", "task.score_candidates", "audit.write")
-    triggers = ("DatasetProfileCompleted", "UserClarificationReceived")
+    triggers = ("HardwareProfileCompleted", "UserClarificationReceived")
 
     async def handle(self, event: AgentEvent) -> None:
         session_id = event.session_id
@@ -26,6 +26,25 @@ class TaskInferenceAgent(BaseAgent):
         info = facts.get("info") or {}
         imbalance = profile.get("imbalance") or {}
 
+        await self.announce(
+            session_id,
+            phase="task",
+            title="Inferring training task",
+            summary="Categorizing dataset purpose based on field patterns and class distribution.",
+            steps=[
+                "Check for instruction/response pairs",
+                "Detect potential classification labels",
+                "Analyze class balance for classification candidates",
+            ],
+            outputs=["task_inference artifact"],
+            requires_approval=True,
+            parent=event.id,
+        )
+
+        comment = await self.wait_for_approval(session_id, "task")
+        if comment:
+            await self.think(session_id, f"User task inference feedback: {comment}")
+
         # If user has answered q_task_type, take their answer as ground truth.
         forced_task = self._user_chose_task(session)
         if forced_task:
@@ -33,7 +52,7 @@ class TaskInferenceAgent(BaseAgent):
             scores = {chosen: 1.0}
             confidence = 1.0
             missing = self._missing_after_user(session, buckets, imbalance)
-            await self.think_delta(session_id, f"Using user-specified task: {chosen}", is_final=True, parent=event.id)
+            await self.think(session_id, f"Using user-specified task: {chosen}")
         else:
             await self.think_delta(session_id, "Analyzing dataset structure to infer the best training task...", is_final=False, parent=event.id)
             

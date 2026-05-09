@@ -56,9 +56,24 @@ class ModelSelectionAgent(BaseAgent):
                 "Pick the highest-scoring fit",
             ],
             outputs=["chosen_model artifact", "candidate_models shortlist"],
-            requires_approval=False,
+            requires_approval=True,
             parent=event.id,
         )
+
+        await self.materialize_node(
+            session_id,
+            {"id": "model", "type": "config", "position": {"x": 360, "y": 240}, "data": {"label": "base model"}},
+            parent=event.id,
+        )
+        await self.materialize_edge(
+            session_id,
+            {"id": "e-preprocess-model", "source": "preprocess", "target": "model", "animated": True},
+            parent=event.id,
+        )
+
+        comment = await self.wait_for_approval(session_id, "model_search")
+        if comment:
+            await self.think(session_id, f"User model search feedback: {comment}")
 
         # Stage 1: live Hub search (or fallback catalogue).
         searched = await self.call_tool(

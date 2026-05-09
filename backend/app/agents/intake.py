@@ -37,14 +37,21 @@ class DatasetIntakeAgent(BaseAgent):
                 "Classify columns: instruction-like / input-like / output-like / label-like",
             ],
             outputs=["dataset_facts artifact"],
+            requires_approval=True,
             parent=event.id,
         )
+
         await self.materialize_node(
             session_id,
             {"id": "dataset", "type": "dataset", "position": {"x": 40, "y": 80},
              "data": {"label": "dataset", "dataset_id": dataset_id}},
             parent=event.id,
         )
+
+        comment = await self.wait_for_approval(session_id, "intake")
+        if comment:
+            await self.think(session_id, f"User intake feedback: {comment}")
+
         await self.emit("IntakeStarted", session_id, payload={"dataset_id": dataset_id})
 
         info = await self.call_tool("dataset.inspect", {"dataset_id": dataset_id}, session_id)

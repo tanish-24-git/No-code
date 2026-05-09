@@ -2,6 +2,9 @@
 given a chosen model and the rest of the context."""
 from __future__ import annotations
 
+import json
+import re
+
 from app.agents.base import BaseAgent
 from app.events.types import AgentEvent
 from app.services import decision_log, session_service
@@ -24,6 +27,17 @@ class TrainingStrategyAgent(BaseAgent):
         chosen_model = session.artifacts.get("chosen_model") or {}
         priority = self._user_priority(session) or "quality"
 
+        await self.materialize_node(
+            session_id,
+            {"id": "strategy", "type": "config", "position": {"x": 640, "y": 80}, "data": {"label": "strategy"}},
+            parent=event.id,
+        )
+        await self.materialize_edge(
+            session_id,
+            {"id": "e-model-strategy", "source": "model", "target": "strategy", "animated": True},
+            parent=event.id,
+        )
+
         await self.announce(
             session_id,
             phase="strategy",
@@ -35,19 +49,50 @@ class TrainingStrategyAgent(BaseAgent):
             ),
             steps=[
                 "Pick LoRA / QLoRA / DoRA based on VRAM headroom",
-                "Set bf16 / fp16 / fp32 by device support",
+                "Set precision (bf16/fp16/fp32) by device support",
                 "Compute batch * grad_accum to fit VRAM",
-                "Estimate runtime",
+                "Deliberate on SOTA-2026 variants (DoRA, GaLore, Unsloth)",
             ],
             outputs=["strategy artifact", "runtime_estimate"],
+            requires_approval=True,
             parent=event.id,
         )
 
+        comment = await self.wait_for_approval(session_id, "strategy")
+        if comment:
+            await self.think(session_id, f"User strategy feedback: {comment}")
+
+        await self.think(session_id, "Deliberating on the best SOTA stack for your hardware...")
+
+        # Get the tool-based baseline.
         strategy = await self.call_tool(
             "strategy.choose",
             {"model": chosen_model, "hardware": hw, "profile": profile, "task": task, "priority": priority},
             session_id,
         )
+
+        # In full agent mode, let the LLM refine the strategy.
+        if session.llm_provider:
+            prompt = (
+                f"Dataset: {profile.get('row_count')} rows, {profile.get('p95')} p95 tokens.\n"
+                f"Model: {chosen_model.get('repo_id')} ({chosen_model.get('params_b')}B params).\n"
+                f"Hardware: {hw.get('device')} with {hw.get('vram_gb')}GB VRAM.\n"
+                f"Baseline Strategy: {json.dumps(strategy)}\n\n"
+                f"Refine this strategy. Should we use DoRA, GaLore, or Unsloth? "
+                f"Explain your reasoning. Return the final strategy as a JSON object."
+            )
+            try:
+                refined_text = await self.call_llm(
+                    session_id,
+                    prompt,
+                    system="You are a SOTA training architect. Return ONLY the refined JSON strategy.",
+                    parent=event.id,
+                )
+                m = re.search(r"\{.*\}", refined_text, re.DOTALL)
+                if m:
+                    strategy = json.loads(m.group(0))
+            except Exception:
+                pass
         if "error" in strategy:
             await self.emit_error(session_id, strategy["error"])
             return

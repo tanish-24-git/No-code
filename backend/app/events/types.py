@@ -41,6 +41,7 @@ EventKind = Literal[
     "PhaseStarted", "PhaseCompleted",
     "PhasePlanProposed", "PhaseApproved", "PhaseCommented",
     "NodeMaterialized",          # canvas should pop a node into existence
+    "EdgeMaterialized",          # canvas should draw a connection
     # ── Streaming kinds (used by audit / sandbox / alchemy agents) ────────
     # payload.stream is one of:
     #   "thinking" / "planning" / "asking" / "garnishing" / "executing"

@@ -26,6 +26,7 @@ job.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Optional
 
@@ -36,6 +37,7 @@ from app.services import session_service
 from app.services.blackboard import get_blackboard
 from app.services.phase_service import (
     PhasePlan,
+    announce_edge,
     announce_node,
     announce_phase,
     complete_phase,
@@ -98,7 +100,31 @@ class BaseAgent:
         return ev
 
     async def emit_message(self, session_id: str, text: str, *, parent: Optional[str] = None) -> AgentEvent:
+        text = self._clean_text(text)
         return await self.emit("AssistantMessage", session_id, payload={"text": text}, parent_event_id=parent)
+
+    async def stream_message(
+        self,
+        session_id: str,
+        delta: str,
+        *,
+        is_final: bool = False,
+        parent: Optional[str] = None,
+    ) -> None:
+        """Stream an incremental assistant response."""
+        await self.emit(
+            "AssistantMessage",
+            session_id,
+            payload={
+                "delta": self._clean_text(delta),
+                "is_final": is_final,
+            },
+            parent_event_id=parent,
+        )
+
+    def _clean_text(self, text: str) -> str:
+        """Strip markdown markers to keep the UI clean as per user request."""
+        return text.replace("**", "").replace("* ", "• ").replace("*", "").strip()
 
     async def emit_error(self, session_id: str, message: str) -> AgentEvent:
         return await self.emit("Error", session_id, payload={"error": message})
@@ -156,6 +182,22 @@ class BaseAgent:
             parent_event_id=parent,
         )
 
+    async def materialize_edge(
+        self,
+        session_id: str,
+        edge: dict[str, Any],
+        *,
+        parent: Optional[str] = None,
+    ) -> None:
+        """Tell the canvas to draw a connection right now."""
+        await announce_edge(
+            self.bus,
+            session_id=session_id,
+            actor=self.name,
+            edge=edge,
+            parent_event_id=parent,
+        )
+
     async def complete(
         self,
         session_id: str,
@@ -174,6 +216,32 @@ class BaseAgent:
             artifacts=artifacts,
             parent_event_id=parent,
         )
+
+    async def wait_for_approval(self, session_id: str, phase: str) -> Optional[str]:
+        """Pause execution until the user clicks Approve or submits a Comment.
+        Returns the comment text if one was provided, or None if approved.
+        """
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+
+        async def _on_approved(ev: AgentEvent) -> None:
+            if ev.session_id == session_id and ev.payload.get("phase") == phase:
+                if not future.done():
+                    future.set_result(None)
+
+        async def _on_commented(ev: AgentEvent) -> None:
+            if ev.session_id == session_id and ev.payload.get("phase") == phase:
+                if not future.done():
+                    future.set_result(ev.payload.get("text"))
+
+        self.bus.on("PhaseApproved", _on_approved)
+        self.bus.on("PhaseCommented", _on_commented)
+
+        try:
+            return await future
+        finally:
+            self.bus.off("PhaseApproved", _on_approved)
+            self.bus.off("PhaseCommented", _on_commented)
 
     # ── Streaming helpers (blackboard-mirrored) ────────────────────────────
 
