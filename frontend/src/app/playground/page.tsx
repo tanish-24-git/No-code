@@ -101,7 +101,7 @@ export default function PlaygroundPage() {
   };
 
   return (
-    <div className="h-[calc(100vh-52px)] bg-black flex overflow-hidden">
+    <div className="h-[calc(100vh-112px)] bg-black flex overflow-hidden">
       {/* ── Left rail ─────────────────────────────────────────────────── */}
       <aside className="w-[280px] border-r border-white/5 flex flex-col bg-[#050505]">
         {/* Upload hero */}
@@ -138,7 +138,12 @@ export default function PlaygroundPage() {
         </div>
 
         {/* Session list */}
-        <div className="flex-1 overflow-y-auto">
+        <div 
+          className="flex-1 overflow-y-auto overscroll-y-contain" 
+          onWheel={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
+          onTouchMove={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
+          data-lenis-prevent="true"
+        >
           <div className="px-4 py-3 flex items-center gap-2">
             <Database className="w-3 h-3 text-white/30" />
             <span className="text-[9px] uppercase tracking-[0.25em] font-black text-white/40">

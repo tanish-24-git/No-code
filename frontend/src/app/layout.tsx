@@ -3,6 +3,7 @@ import { Inter, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 import { Nav } from '@/components/Nav';
 import { ConfigBanner } from '@/components/ConfigBanner';
+import SmoothScroll from '@/components/SmoothScroll';
 
 
 // next/font self-hosts these at build time.
@@ -29,7 +30,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="antialiased">
         <Nav />
         <ConfigBanner />
-        <main className="pt-[52px] min-h-screen">{children}</main>
+        <main className="pt-28 min-h-screen">
+          <SmoothScroll>
+            {children}
+          </SmoothScroll>
+        </main>
       </body>
     </html>
   );

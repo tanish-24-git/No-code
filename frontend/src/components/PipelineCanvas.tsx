@@ -68,20 +68,6 @@ function PipelineNode({ data }: { data: { label?: string; type?: string; status?
   );
 }
 
-const nodeTypes: NodeTypes = {
-  dataset: PipelineNode,
-  preprocess: PipelineNode,
-  balance: PipelineNode,
-  split: PipelineNode,
-  augment: PipelineNode,
-  template_prompts: PipelineNode,
-  convert_format: PipelineNode,
-  train: PipelineNode,
-  evaluate: PipelineNode,
-  sandbox: PipelineNode,
-  export: PipelineNode,
-};
-
 const NODE_X_STEP = 240;
 const NODE_Y = 80;
 
@@ -95,7 +81,7 @@ function CanvasInner({ pipeline, events, onGraphChange, onSelectNode }: Props) {
       position: n.position,
       data: { label: (n.data?.label as string) || n.id, type: n.type, ...n.data },
     }));
-  }, [pipeline?.id, pipeline?.node_graph?.nodes]);
+  }, [pipeline?.node_graph?.nodes]);
 
   // Source of truth #2: agent-driven node materialization. Used when no
   // pipeline exists yet, or before its nodes have been published.
@@ -147,6 +133,22 @@ function CanvasInner({ pipeline, events, onGraphChange, onSelectNode }: Props) {
 
   const [nodes, setNodes, onNodesChange] = useNodesState(computedNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(computedEdges);
+
+  const nodeTypes = useMemo(() => ({
+    dataset: PipelineNode,
+    preprocess: PipelineNode,
+    balance: PipelineNode,
+    split: PipelineNode,
+    augment: PipelineNode,
+    template_prompts: PipelineNode,
+    convert_format: PipelineNode,
+    train: PipelineNode,
+    evaluate: PipelineNode,
+    sandbox: PipelineNode,
+    export: PipelineNode,
+  }), []);
+
+  const fitViewOptions = useMemo(() => ({ padding: 0.5 }), []);
   const [hasFitInitial, setHasFitInitial] = useState(false);
 
   // Keep canvas in sync with computed sources.
@@ -188,7 +190,7 @@ function CanvasInner({ pipeline, events, onGraphChange, onSelectNode }: Props) {
       onPaneClick={() => onSelectNode?.(null)}
       nodeTypes={nodeTypes}
       fitView={hasFitInitial}
-      fitViewOptions={{ padding: 0.5 }}
+      fitViewOptions={fitViewOptions}
       proOptions={{ hideAttribution: true }}
     >
       <Background color="#222" gap={36} size={1} />

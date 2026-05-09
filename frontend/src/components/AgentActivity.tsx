@@ -146,11 +146,12 @@ export function AgentActivity({ sessionId }: Props) {
     isAtBottom.current = scrollHeight - scrollTop - clientHeight < threshold;
   };
 
+  const lastMessageText = transcript[transcript.length - 1]?.payload?.text;
   useEffect(() => {
     if (isAtBottom.current) {
       scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
     }
-  }, [transcript.length, transcript[transcript.length - 1]?.payload?.text]);
+  }, [transcript.length, lastMessageText]);
 
   if (!sessionId) {
     return (
@@ -169,7 +170,10 @@ export function AgentActivity({ sessionId }: Props) {
       <div 
         ref={scrollRef} 
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto px-5 py-5 space-y-4"
+        onWheel={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
+        onTouchMove={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
+        className="flex-1 overflow-y-auto overscroll-y-contain px-5 py-5 space-y-4"
+        data-lenis-prevent="true"
       >
         {transcript.length === 0 && (
           <div className="flex items-center gap-2 text-[12px] text-fg-3">

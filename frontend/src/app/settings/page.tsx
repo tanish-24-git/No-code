@@ -120,17 +120,22 @@ export default function SettingsPage() {
 
   return (
     <div className="max-w-[820px] mx-auto px-8 py-10 space-y-8">
-      <header>
-        <h1 className="font-sans font-bold text-2xl mb-1">Settings</h1>
-        <p className="text-fg-2 text-sm">
-          Values from the UI override values from <code className="text-fg">backend/.env</code>. Sensitive
-          values are encrypted at rest under <code className="text-fg">data/.encryption_key</code>.
+      <header className="mb-12">
+        <h1 className="font-sans font-black text-4xl mb-4 tracking-tighter bg-gradient-to-r from-white via-white/80 to-white/40 bg-clip-text text-transparent">
+          System Settings
+        </h1>
+        <p className="text-fg-2 text-sm max-w-2xl leading-relaxed">
+          Configure external integrations and API keys. Values from the UI override values from <code className="px-1.5 py-0.5 rounded-md bg-white/5 border border-white/10 text-white/80 font-mono text-xs">backend/.env</code>. Sensitive
+          values are encrypted at rest under <code className="px-1.5 py-0.5 rounded-md bg-white/5 border border-white/10 text-white/80 font-mono text-xs">data/.encryption_key</code>.
         </p>
       </header>
 
       <section className="card space-y-3">
         <div className="flex items-center justify-between gap-2 flex-wrap">
-          <h2 className="text-fg text-sm tracking-wider uppercase">LLM provider (agent brain)</h2>
+          <h2 className="text-white text-xs font-bold tracking-[0.2em] uppercase flex items-center gap-3">
+            <span className="w-2 h-2 rounded-full bg-orange-500 animate-pulse shadow-[0_0_10px_rgba(249,115,22,0.5)]" />
+            LLM provider (agent brain)
+          </h2>
           {sourceBadge(data.llm_source)}
         </div>
 
@@ -222,7 +227,10 @@ export default function SettingsPage() {
 
       <section className="card space-y-3">
         <div className="flex items-center justify-between gap-2 flex-wrap">
-          <h2 className="text-fg text-sm tracking-wider uppercase">Hugging Face token</h2>
+          <h2 className="text-white text-xs font-bold tracking-[0.2em] uppercase flex items-center gap-3">
+            <span className="w-2 h-2 rounded-full bg-orange-500 animate-pulse shadow-[0_0_10px_rgba(249,115,22,0.5)]" />
+            Hugging Face token
+          </h2>
           {sourceBadge(data.hf_source)}
         </div>
         <p className="text-fg-2 text-xs">
@@ -256,10 +264,20 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      {verifyMsg && <div className="text-xs text-fg">{verifyMsg}</div>}
+      {verifyMsg && (
+        <div className="card !bg-black/60 border-orange-500/30 text-orange-200 text-sm py-4">
+          <div className="flex items-center gap-3">
+            <span className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse" />
+            <span className="font-mono">{verifyMsg}</span>
+          </div>
+        </div>
+      )}
 
       <section className="card space-y-3">
-        <h2 className="text-fg text-sm tracking-wider uppercase">Behaviour</h2>
+        <h2 className="text-white text-xs font-bold tracking-[0.2em] uppercase mb-4 flex items-center gap-3">
+          <span className="w-2 h-2 rounded-full bg-orange-500 animate-pulse shadow-[0_0_10px_rgba(249,115,22,0.5)]" />
+          Behaviour
+        </h2>
         <Toggle
           label="auto-configure pipeline on dataset upload"
           checked={data.auto_config_on_upload}
@@ -282,13 +300,13 @@ function Toggle({ label, checked, onChange }: { label: string; checked: boolean;
       <button
         type="button"
         onClick={() => onChange(!checked)}
-        className={`relative w-9 h-5 rounded-full border ${
-          checked ? 'bg-success/20 border-success/40' : 'bg-bg-3 border-border-2'
+        className={`relative w-9 h-5 rounded-full border transition-colors ${
+          checked ? 'bg-orange-500/20 border-orange-500/40' : 'bg-black/40 border-white/10'
         }`}
       >
         <span
           className={`absolute top-0.5 w-4 h-4 rounded-full transition-all ${
-            checked ? 'left-[18px] bg-success' : 'left-0.5 bg-fg-2'
+            checked ? 'left-[18px] bg-orange-500 shadow-[0_0_10px_rgba(249,115,22,0.5)]' : 'left-0.5 bg-white/30'
           }`}
         />
       </button>

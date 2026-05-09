@@ -62,7 +62,10 @@ export function LogPanel({ jobId }: Props) {
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto p-3 font-mono text-[11px] space-y-0.5"
+        onWheel={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
+        onTouchMove={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
+        className="flex-1 overflow-y-auto overscroll-y-contain p-3 font-mono text-[11px] space-y-0.5"
+        data-lenis-prevent="true"
       >
         {!jobId && <div className="text-fg-3">click run to start a job — logs stream here.</div>}
         {lines.map((l, i) => (
