@@ -22,6 +22,9 @@ from app.events.types import AgentEvent, EventKind, StreamTone
 from app.services import session_service
 from app.services.blackboard import get_blackboard
 from app.tools.registry import ToolContext, run_tool
+from app.agents.providers import stream_chat
+from app.agents.registry import get_spec
+from app.utils.config import settings
 
 
 log = logging.getLogger("finetune-studio.agents")
@@ -104,6 +107,70 @@ class BaseAgent:
             payload={"stream": "thinking", "agent": self.name, "text": thought, "meta": meta or {}},
             parent_event_id=parent,
         )
+
+    async def think_delta(
+        self,
+        session_id: str,
+        delta: str,
+        *,
+        is_final: bool = False,
+        parent: Optional[str] = None,
+    ) -> None:
+        """Stream an incremental thought fragment for autoregressive UI feel."""
+        await self.emit(
+            "AgentThinking",
+            session_id,
+            payload={
+                "stream": "thinking",
+                "agent": self.name,
+                "delta": delta,
+                "is_final": is_final,
+            },
+            parent_event_id=parent,
+        )
+
+    async def call_llm(
+        self,
+        session_id: str,
+        prompt: str,
+        *,
+        system: str = "",
+        stream_thoughts: bool = True,
+        parent: Optional[str] = None,
+    ) -> str:
+        """Execute a reasoning step using the session's configured LLM."""
+        session = self.get_session(session_id)
+        if not session:
+            return ""
+
+        full_text = ""
+        # messages shape for the provider
+        messages = [{"role": "user", "content": prompt}]
+
+        # We pull the provider settings from the session record.
+        # Defaults to gemini-2.0-flash if not set (or env fallback).
+        provider = session.llm_provider or settings.llm_provider or "gemini"
+        model = session.llm_model or settings.llm_model or "gemini-2.0-flash"
+        base_url = session.llm_base_url or settings.llm_base_url or ""
+        api_key = session.llm_api_key or settings.llm_api_key or ""
+
+        # Run the stream
+        for chunk in stream_chat(
+            provider=provider,
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            messages=messages,
+            extra_system=system,
+        ):
+            full_text += chunk
+            if stream_thoughts:
+                await self.think_delta(session_id, chunk, parent=parent)
+
+        if stream_thoughts:
+            await self.think_delta(session_id, "", is_final=True, parent=parent)
+
+        return full_text
 
     async def plan(
         self,

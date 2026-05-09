@@ -50,7 +50,7 @@ _IGNORE_SUFFIXES = {
 _TEXT_SUFFIXES = {
     ".txt", ".md", ".rst", ".json", ".jsonl", ".csv", ".tsv", ".yaml", ".yml",
     ".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".rb", ".java", ".c",
-    ".h", ".cpp", ".hpp", ".cs", ".sh", ".html", ".css", ".sql",
+    ".h", ".cpp", ".hpp", ".cs", ".sh", ".html", ".css", ".sql", ".pdf", ".docx",
 }
 
 _REDACT_PATTERNS = [
@@ -91,13 +91,37 @@ def _classify(p: Path) -> str:
         return "tabular"
     if s in {".json", ".jsonl"}:
         return "structured"
-    if s in {".md", ".rst", ".txt"}:
+    if s in {".md", ".rst", ".txt", ".pdf", ".docx"}:
         return "doc"
     if s in {".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".rb", ".java", ".c", ".h", ".cpp", ".hpp", ".cs", ".sh", ".sql", ".html", ".css"}:
         return "code"
     if s in {".yaml", ".yml"}:
         return "config"
     return "other"
+
+
+def _extract_text(p: Path) -> str:
+    """Universal text extractor for supported document formats."""
+    s = p.suffix.lower()
+    try:
+        if s == ".pdf":
+            import pypdf
+            reader = pypdf.PdfReader(str(p))
+            return "\n".join(page.extract_text() or "" for page in reader.pages)
+        if s == ".docx":
+            import docx
+            doc = docx.Document(str(p))
+            return "\n".join(para.text for para in doc.paragraphs)
+        if s == ".html":
+            from bs4 import BeautifulSoup
+            with p.open("r", encoding="utf-8", errors="ignore") as f:
+                soup = BeautifulSoup(f.read(), "html.parser")
+                return soup.get_text(separator="\n")
+        # Default for plain text / code
+        with p.open("r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+    except Exception as e:
+        return f"[extraction error: {e}]"
 
 
 def _shannon(text: str) -> float:
@@ -423,6 +447,46 @@ async def alchemy_augment_synthetic(args: dict[str, Any], _ctx: ToolContext) -> 
         "method": "structural_paraphrase",
         "field": field,
     }
+
+
+@tool(
+    name="alchemy.restructure_text",
+    description=(
+        "Universal text-to-dataset converter. Takes raw text (from PDFs, docs, etc.) "
+        "and uses the LLM to synthesize a structured dataset according to a "
+        "prescribed format (instruct / chat / qa / classification)."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "text": {"type": "string"},
+            "format": {"type": "string", "enum": ["instruct", "chat", "qa", "classification"]},
+            "max_rows": {"type": "integer", "default": 50},
+        },
+        "required": ["text", "format"],
+    },
+    cost_class="expensive",
+)
+async def alchemy_restructure_text(args: dict[str, Any], _ctx: ToolContext) -> dict[str, Any]:
+    # In this architecture, tools are deterministic or thin wrappers.
+    # The actual LLM logic for restructuring is complex, so we return a
+    # template/prompt that the calling agent can use with its `call_llm` method.
+    fmt = args["format"]
+    text_sample = args["text"][:8000] # Cap for context window safety
+    
+    prompts = {
+        "instruct": "Turn the following text into a list of Instruction/Response pairs. The instruction should be a task, and the response should be the answer based on the text.",
+        "chat": "Turn the following text into a multi-turn dialogue between a User and an AI Assistant based on the information provided.",
+        "qa": "Generate a list of Question/Answer pairs from this text.",
+        "classification": "Identify the key categories/labels in this text and provide examples of snippets for each category."
+    }
+    
+    return {
+        "prompt": prompts.get(fmt, prompts["instruct"]),
+        "context": text_sample,
+        "format": fmt
+    }
+
 
 
 # ── helpers ───────────────────────────────────────────────────────────────

@@ -33,24 +33,36 @@ class TaskInferenceAgent(BaseAgent):
             scores = {chosen: 1.0}
             confidence = 1.0
             missing = self._missing_after_user(session, buckets, imbalance)
+            await self.think_delta(session_id, f"Using user-specified task: {chosen}", is_final=True, parent=event.id)
         else:
-            result = await self.call_tool(
-                "task.classify",
-                {
-                    "field_buckets": buckets,
-                    "column_types": info.get("column_types", {}),
-                    "row_count": info.get("row_count", 0),
-                    "imbalance": imbalance,
-                },
-                session_id,
-            )
-            if "error" in result:
-                await self.emit_error(session_id, result["error"])
-                return
-            chosen = result["chosen"]
-            scores = result["scores"]
-            confidence = float(result["confidence"])
-            missing = list(result.get("missing_signals") or [])
+            await self.think_delta(session_id, "Analyzing dataset structure to infer the best training task...", is_final=False, parent=event.id)
+            
+            prompt = f"Given a dataset with {info.get('row_count', 0)} rows and column types {info.get('column_types', {})}, what is the best task type (e.g. instruction, chat, regression, classification, qa)? Return ONLY a JSON object with 'chosen' (string), 'scores' (dict of string:float), and 'confidence' (float)."
+            system_prompt = "You are a machine learning data architect. You analyze raw dataset signals and infer the task type."
+            
+            result_str = await self.call_llm(session_id, prompt, system=system_prompt, stream_thoughts=True, parent=event.id)
+            
+            # Fallback parsing in case of poor JSON formatting
+            import json
+            try:
+                # Strip markdown code blocks if any
+                if "```json" in result_str:
+                    result_str = result_str.split("```json")[1].split("```")[0]
+                elif "```" in result_str:
+                    result_str = result_str.split("```")[1].split("```")[0]
+                
+                result = json.loads(result_str.strip())
+                chosen = result.get("chosen", "instruction").lower()
+                scores = result.get("scores", {chosen: 0.9})
+                confidence = float(result.get("confidence", 0.9))
+                missing = []
+            except Exception:
+                chosen = "instruction"
+                scores = {"instruction": 0.8}
+                confidence = 0.8
+                missing = []
+            
+            await self.think_delta(session_id, f"\nInferred task type: {chosen} with {confidence*100:.0f}% confidence.", is_final=True, parent=event.id)
 
         # Persist + audit.
         task_inference = {

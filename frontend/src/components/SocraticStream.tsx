@@ -61,7 +61,30 @@ function classify(e: AgentEvent): Tone | null {
 }
 
 export function SocraticStream({ events }: { events: AgentEvent[] }) {
-  const stream = useMemo(() => events.filter((e) => STREAM_KINDS.has(e.kind)), [events]);
+  const stream = useMemo(() => {
+    const filtered = events.filter((e) => STREAM_KINDS.has(e.kind));
+    const collapsed: AgentEvent[] = [];
+    
+    for (const e of filtered) {
+      if (e.kind === 'AgentThinking' && e.payload && typeof (e.payload as any).delta === 'string') {
+        const last = collapsed[collapsed.length - 1];
+        if (last && last.kind === 'AgentThinking' && last.actor === e.actor) {
+          // Accumulate delta into the last event's text
+          const lp = last.payload as any;
+          lp.text = (lp.text || '') + (e.payload as any).delta;
+          continue;
+        } else {
+          // Start a new collapsed event for deltas
+          const newPayload = { ...e.payload as any, text: (e.payload as any).delta || '' };
+          collapsed.push({ ...e, payload: newPayload });
+          continue;
+        }
+      }
+      collapsed.push(e);
+    }
+    return collapsed;
+  }, [events]);
+
   if (stream.length === 0) return null;
 
   // Most recent at the top of the stream — feels alive.
@@ -69,7 +92,7 @@ export function SocraticStream({ events }: { events: AgentEvent[] }) {
 
   return (
     <div className="space-y-2">
-      {stream.map((e) => {
+      {stream.map((e, idx) => {
         const tone = classify(e);
         if (!tone) return null;
         const style = TONE_STYLE[tone];
@@ -191,6 +214,9 @@ function Body({ event, tone }: { event: AgentEvent; tone: Tone }) {
   return (
     <p className={cn('text-[12px] leading-relaxed', tone === 'thinking' ? 'text-white/70 italic' : 'text-white/85')}>
       {String(p.text ?? '')}
+      {tone === 'thinking' && p.is_final === false && (
+        <span className="ml-[2px] inline-block w-[6px] h-[12px] bg-white/50 animate-pulse align-middle" />
+      )}
     </p>
   );
 }
