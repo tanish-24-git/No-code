@@ -36,14 +36,36 @@ class RecoveryAgent(BaseAgent):
         pipeline = pipeline_service.get(session.pipeline_id) if session.pipeline_id else None
         cfg = pipeline.config.model_dump() if pipeline else {}
 
-        plan = await self.call_tool(
-            "recovery.propose_plan",
-            {"anomaly": anomaly, "config": cfg, "extra_minutes": 5.0},
-            session.id,
-        )
+        await self.think_delta(session.id, f"Training anomaly detected: {anomaly}. Analyzing error trace and generating recovery strategy...", is_final=False, parent=event.id)
+        
+        prompt = f"Anomaly: {anomaly}. Config: {cfg}. Propose a JSON recovery plan. Return ONLY JSON with 'diff_id' (string), 'operations' (list of dicts with 'op', 'path', 'new'), 'rationale' (string), 'confidence' (float), 'estimated_extra_minutes' (float)."
+        system_prompt = "You are a training recovery agent. Fix OOMs by halving batch size, etc. Output valid JSON."
+        
+        result_str = await self.call_llm(session.id, prompt, system=system_prompt, stream_thoughts=True, parent=event.id)
+        
+        import json
+        import uuid
+        try:
+            if "```json" in result_str:
+                result_str = result_str.split("```json")[1].split("```")[0]
+            elif "```" in result_str:
+                result_str = result_str.split("```")[1].split("```")[0]
+            plan = json.loads(result_str.strip())
+            if "diff_id" not in plan:
+                plan["diff_id"] = str(uuid.uuid4())
+        except Exception:
+            # Fallback if LLM fails
+            plan = await self.call_tool(
+                "recovery.propose_plan",
+                {"anomaly": anomaly, "config": cfg, "extra_minutes": 5.0},
+                session.id,
+            )
+            
         if "error" in plan or not plan.get("operations"):
-            await self.emit_message(session.id, f"Recovery: no automatic fix for `{anomaly}`.", parent=event.id)
+            await self.think_delta(session.id, f"\nRecovery: no automatic fix for `{anomaly}`.", is_final=True, parent=event.id)
             return
+            
+        await self.think_delta(session.id, f"\nRecovery strategy formulated with confidence {plan.get('confidence', 0.0)}.", is_final=True, parent=event.id)
 
         record = RecoveryRecord(
             diff_id=plan["diff_id"],

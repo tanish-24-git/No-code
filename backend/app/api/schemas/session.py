@@ -79,6 +79,7 @@ class AgentSession(BaseModel):
     """Long-running container. One per dataset upload."""
 
     id: str
+    name: str = "New Session"
     dataset_id: str
     pipeline_id: Optional[str] = None
     job_id: Optional[str] = None
@@ -91,6 +92,13 @@ class AgentSession(BaseModel):
     clarifications: list[ClarificationAnswer] = Field(default_factory=list)
     recovery_history: list[RecoveryRecord] = Field(default_factory=list)
     artifacts: dict[str, Any] = Field(default_factory=dict)   # profile, hardware, candidates, draft, evaluation
+    
+    # LLM configuration overrides for this specific session
+    llm_provider: Optional[str] = None
+    llm_model: Optional[str] = None
+    llm_base_url: Optional[str] = None
+    llm_api_key: Optional[str] = None
+
     last_event_id: Optional[str] = None
     error_message: Optional[str] = None
     created_at: datetime

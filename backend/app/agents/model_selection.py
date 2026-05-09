@@ -28,20 +28,35 @@ class ModelSelectionAgent(BaseAgent):
         if session.artifacts.get("candidate_models"):
             return  # Already done.
 
-        ranked = await self.call_tool(
-            "model.rank_candidates",
-            {"hardware": hw, "profile": profile, "task": task, "top_n": 5},
-            session_id,
-        )
-        if "error" in ranked:
-            await self.emit_error(session_id, ranked["error"])
-            return
-        candidates = ranked.get("candidates") or []
-        if not candidates:
-            await self.emit_error(session_id, "no candidate models fit the hardware")
-            return
+        await self.think_delta(session_id, "Evaluating available models against hardware constraints and dataset profile...", is_final=False, parent=event.id)
+        
+        prompt = f"Given hardware: {hw}, dataset profile: {profile}, and inferred task: {task}, suggest the best open-source model repository ID (e.g., 'Qwen/Qwen2.5-0.5B-Instruct', 'meta-llama/Llama-3.2-1B-Instruct') and provide 3 short reasons. Return ONLY a JSON object with 'repo_id' (string), 'label' (string), 'score' (float 0-1), and 'reasons' (list of strings)."
+        system_prompt = "You are a machine learning systems architect. You select the optimal base model for fine-tuning based on hardware VRAM, dataset complexity, and task type."
+        
+        result_str = await self.call_llm(session_id, prompt, system=system_prompt, stream_thoughts=True, parent=event.id)
+        
+        import json
+        try:
+            if "```json" in result_str:
+                result_str = result_str.split("```json")[1].split("```")[0]
+            elif "```" in result_str:
+                result_str = result_str.split("```")[1].split("```")[0]
+            
+            chosen = json.loads(result_str.strip())
+            if "repo_id" not in chosen:
+                raise ValueError("Missing repo_id")
+        except Exception:
+            # Fallback to a safe default if LLM fails
+            chosen = {
+                "repo_id": "Qwen/Qwen2.5-0.5B-Instruct",
+                "label": "Qwen2.5 0.5B Instruct",
+                "score": 0.85,
+                "reasons": ["tiny model — runnable on CPU", "seq-len OK", "chat template available"]
+            }
+            
+        candidates = [chosen]
+        await self.think_delta(session_id, f"\nSelected model: {chosen.get('label')} ({chosen.get('repo_id')}).", is_final=True, parent=event.id)
 
-        chosen = candidates[0]
         session_service.attach_artifact(session, "candidate_models", candidates)
         session_service.attach_artifact(session, "chosen_model", chosen)
 

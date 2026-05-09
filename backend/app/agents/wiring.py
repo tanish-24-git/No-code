@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from app.agents.alchemy import DataAlchemistAgent
+from app.agents.data_restructurer import DataRestructurerAgent
 from app.agents.audit import AuditAgent
 from app.agents.base import BaseAgent
 from app.agents.clarification import ClarificationAgent
@@ -46,6 +47,7 @@ def register_agents(bus: EventBus) -> list[BaseAgent]:
         DatasetIntakeAgent(bus),
         DatasetProfilingAgent(bus),
         DataAlchemistAgent(bus),
+        DataRestructurerAgent(bus),
         HardwareAnalysisAgent(bus),
         TaskInferenceAgent(bus),
         ConfidenceGate(bus),

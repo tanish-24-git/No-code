@@ -17,6 +17,9 @@ cryptography==42.0.8
 # Data
 pandas==2.2.2
 numpy==1.26.4
+pypdf==4.2.0
+python-docx==1.1.0
+beautifulsoup4==4.12.3
 
 # Training stack (only needed if running real jobs locally)
 torch==2.3.0

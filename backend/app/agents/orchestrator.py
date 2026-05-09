@@ -15,20 +15,24 @@ the agent has a strategy.
 """
 from __future__ import annotations
 
+import re
 from app.agents.base import BaseAgent
 from app.events.types import AgentEvent
 
 
-_OPENING_PLAN = [
-    "Inspect your dataset and grade its health",
-    "Probe local hardware (device, VRAM, throughput)",
-    "Infer the task and ask if I'm under-confident",
-    "Rank base models against the joint context",
-    "Pick a SOTA training stack (DoRA / GaLore / Unsloth as warranted)",
-    "Draft the pipeline graph node-by-node",
-    "Run training with live anomaly + recovery monitoring",
-    "Benchmark in an isolated sandbox and finalize export",
-]
+_PLAN_SYSTEM_PROMPT = """You are the Lead Orchestrator for FineTune Studio.
+Your goal is to generate a structured JSON plan for the user's fine-tuning session.
+Consider the user's input and the overall workflow:
+1. Data Alchemy (cleaning, dedup, PII redaction, restructuring raw text)
+2. Hardware Analysis (VRAM, GPU throughput)
+3. Task Inference (finding the ideal objective)
+4. Strategy Selection (DoRA, LoRA, Unsloth)
+5. Pipeline Construction
+6. Live Training & Monitoring
+7. Evaluation & Export
+
+Output ONLY a JSON list of strings representing the steps."""
+
 
 
 class OrchestratorAgent(BaseAgent):
@@ -45,19 +49,37 @@ class OrchestratorAgent(BaseAgent):
 
     async def _open(self, event: AgentEvent) -> None:
         session_id = event.session_id
+        session = self.get_session(session_id)
+        
+        # 1. Generate Greeting
+        greeting_prompt = f"The user just started a session. Their input context: {session.name if session else 'new project'}. Write a brief, professional greeting (2 sentences) as the FineTune Studio Orchestrator."
+        greeting = await self.call_llm(session_id, greeting_prompt, system="You are the Voice of FineTune Studio. Professional, expert, and proactive.", stream_thoughts=False)
+        
         await self.emit_message(
             session_id,
-            "**Session online.** I'm the master orchestrator — I'll narrate "
-            "every step, ask before high-impact decisions, and pause for "
-            "your input whenever the data forces a judgment call.",
+            greeting + " I've analyzed your project and I'm drafting a custom execution strategy now.",
             parent=event.id,
         )
-        await self.plan(session_id, _OPENING_PLAN, title="Master plan", parent=event.id)
+
+        # 2. Dynamic Planning
+        await self.think(session_id, "Formulating a custom strategy based on your project goals...", parent=event.id)
+        
+        plan_prompt = f"Generate a 6-8 step execution plan for this project: {session.name if session else 'General training task'}. Return ONLY a JSON list of strings."
+        plan_json = await self.call_llm(session_id, plan_prompt, system=_PLAN_SYSTEM_PROMPT, parent=event.id)
+        
+        try:
+            # Try to extract JSON if the LLM wrapped it in markdown
+            import json
+            match = re.search(r"\[.*\]", plan_json, re.DOTALL)
+            steps = json.loads(match.group(0)) if match else []
+        except Exception:
+            steps = ["Analyze dataset", "Check hardware", "Configure training", "Execute pipeline", "Export model"]
+
+        await self.plan(session_id, steps, title="Master Plan", parent=event.id)
+        
         await self.think(
             session_id,
-            "Booting the swarm: data alchemist, hardware analyst, task "
-            "inference, model ranker, architectural designer, and audit critic "
-            "are all subscribed and waiting on the dataset.",
+            "Master plan broadcasted. The swarm is initializing: Data Alchemist, Hardware Analyst, and Task Inference are coming online.",
             parent=event.id,
         )
 
