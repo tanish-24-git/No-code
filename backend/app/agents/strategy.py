@@ -24,38 +24,41 @@ class TrainingStrategyAgent(BaseAgent):
         chosen_model = session.artifacts.get("chosen_model") or {}
         priority = self._user_priority(session) or "quality"
 
-        await self.think_delta(session_id, "Formulating optimal training strategy (evaluating precision, LoRA/DoRA, batch sizes)...", is_final=False, parent=event.id)
-        
-        prompt = f"Hardware: {hw}, Profile: {profile}, Task: {task}, Model: {chosen_model}, Priority: {priority}. Decide the fine-tuning strategy. Return JSON with 'method' (lora/dora/full), 'precision' (float16/float32/bfloat16), 'batch_size' (int), 'gradient_accumulation' (int), 'max_seq_len' (int), 'epochs' (int), 'adapter_variant' (none/dora), 'kernel_pack' (standard/unsloth), 'quantization' (none/4bit/8bit), 'rationale' (list of strings)."
-        system = "You are an AI ML optimizer. Return valid JSON only."
-        
-        result_str = await self.call_llm(session_id, prompt, system=system, stream_thoughts=True, parent=event.id)
-        
-        import json
-        try:
-            if "```json" in result_str:
-                result_str = result_str.split("```json")[1].split("```")[0]
-            elif "```" in result_str:
-                result_str = result_str.split("```")[1].split("```")[0]
-            strategy = json.loads(result_str.strip())
-        except Exception:
-            strategy = {
-                "method": "lora",
-                "precision": "float16",
-                "batch_size": 1,
-                "gradient_accumulation": 8,
-                "max_seq_len": 256,
-                "epochs": 1,
-                "adapter_variant": "none",
-                "kernel_pack": "standard",
-                "quantization": "none",
-                "rationale": ["Default strategy due to JSON parsing error"]
-            }
-        
-        est_min = strategy.get("epochs", 1) * strategy.get("max_seq_len", 256) / 100.0  # mock estimate
+        await self.announce(
+            session_id,
+            phase="strategy",
+            title="Picking a training strategy",
+            summary=(
+                f"Choosing PEFT method, precision, batch size, and seq length "
+                f"for {chosen_model.get('repo_id', 'the chosen model')} on "
+                f"{hw.get('device', 'cpu').upper()}."
+            ),
+            steps=[
+                "Pick LoRA / QLoRA / DoRA based on VRAM headroom",
+                "Set bf16 / fp16 / fp32 by device support",
+                "Compute batch * grad_accum to fit VRAM",
+                "Estimate runtime",
+            ],
+            outputs=["strategy artifact", "runtime_estimate"],
+            parent=event.id,
+        )
 
-        await self.think_delta(session_id, f"\nStrategy chosen: {strategy.get('method')} with batch size {strategy.get('batch_size')}x{strategy.get('gradient_accumulation')}.", is_final=True, parent=event.id)
-        
+        strategy = await self.call_tool(
+            "strategy.choose",
+            {"model": chosen_model, "hardware": hw, "profile": profile, "task": task, "priority": priority},
+            session_id,
+        )
+        if "error" in strategy:
+            await self.emit_error(session_id, strategy["error"])
+            return
+
+        runtime = await self.call_tool(
+            "strategy.estimate_runtime",
+            {"strategy": strategy, "hardware": hw, "profile": profile, "model": chosen_model},
+            session_id,
+        )
+        est_min = float(runtime.get("estimated_minutes", 0.0))
+
         session_service.attach_artifact(session, "strategy", strategy)
         session_service.attach_artifact(session, "runtime_estimate", {"estimated_minutes": est_min})
 
@@ -69,29 +72,33 @@ class TrainingStrategyAgent(BaseAgent):
             rationale=f"priority={priority}",
         )
 
-        # Streaming "thinking" rationale — blueprint commandment §7.
-        for line in strategy.get("rationale") or []:
-            await self.think(session_id, line, parent=event.id)
-
         # Plan card with the SOTA stack so the user sees DoRA/GaLore/Unsloth.
         stack_bits = [strategy["method"]]
         if strategy.get("adapter_variant") and strategy["adapter_variant"] != "none":
             stack_bits.append(f"+{strategy['adapter_variant'].upper()}")
         if strategy.get("kernel_pack") and strategy["kernel_pack"] != "standard":
-            stack_bits.append(f"·{strategy['kernel_pack']}")
+            stack_bits.append(f"-{strategy['kernel_pack']}")
         if strategy.get("quantization") and strategy["quantization"] != "none":
-            stack_bits.append(f"·{strategy['quantization']}")
+            stack_bits.append(f"-{strategy['quantization']}")
         stack = " ".join(stack_bits)
 
         await self.emit_message(
             session_id,
             f"Strategy: **{stack}** / {strategy['precision']} / "
-            f"batch {strategy['batch_size']}×{strategy['gradient_accumulation']} grad accum / "
+            f"batch {strategy['batch_size']}x{strategy['gradient_accumulation']} grad accum / "
             f"seq {strategy['max_seq_len']} / {strategy['epochs']}ep. "
             f"~{est_min:.1f} min estimated.",
             parent=event.id,
         )
 
+        await self.complete(
+            session_id,
+            phase="strategy",
+            summary=f"{strategy['method']} / {strategy['precision']} / "
+                    f"~{est_min:.1f} min estimated",
+            artifacts={"method": strategy["method"], "precision": strategy["precision"]},
+            parent=event.id,
+        )
         await self.emit(
             "StrategyChosen",
             session_id,

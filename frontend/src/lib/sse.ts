@@ -55,7 +55,8 @@ export function useSessionEvents(sessionId: string | null | undefined) {
       'TrainingCompleted', 'EvaluationStarted', 'EvaluationCompleted',
       'ExportChoiceRequested', 'SaveLocalRequested', 'PushToHFRequested',
       'ExportCompleted',
-      // Socratic stream + hierarchy + sandbox + circuit-breaker
+      'PhaseStarted', 'PhaseCompleted', 'PhasePlanProposed', 'PhaseApproved', 'PhaseCommented',
+      'NodeMaterialized',
       'AgentThinking', 'AgentPlanning', 'AgentAsking', 'AgentGarnishing', 'AgentExecuting',
       'BlackboardUpdated',
       'AuditCritique', 'AuditOverride',

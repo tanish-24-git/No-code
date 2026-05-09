@@ -14,14 +14,25 @@ from app.api.schemas.dataset import DatasetSchema
 from app.events.bus import get_bus
 from app.events.types import AgentEvent
 from app.services import dataset_service, session_service
+from app.tools.llm import ping_llm
 
 
 router = APIRouter(prefix="/api/datasets", tags=["datasets"])
 
 
+class LLMProbe(BaseModel):
+    ok: bool
+    mode: str           # "full_agent" | "deterministic"
+    provider: str | None = None
+    model: str | None = None
+    latency_ms: float = 0.0
+    detail: str = ""
+
+
 class DatasetUploadResponse(BaseModel):
     dataset: DatasetSchema
     session_id: str
+    llm_probe: LLMProbe
 
 
 @router.post("/upload", response_model=DatasetUploadResponse, status_code=201)
@@ -34,21 +45,32 @@ async def upload_dataset(file: UploadFile = File(...)) -> DatasetUploadResponse:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
+    # Probe the configured LLM provider before booting the swarm. The result
+    # determines whether agents run in full LLM-driven mode or deterministic
+    # fallback mode; either way the user sees an explicit verdict in the UI.
+    probe = await ping_llm()
+
     # Start the agent session and emit the first event. The orchestrator
     # posts the welcome message; downstream agents take it from there.
     session = session_service.start_for_dataset(dataset.id)
+    # Persist the probe verdict on the session so agents can branch on it.
+    session_service.attach_artifact(session, "llm_probe", probe)
     bus = get_bus()
 
     await bus.publish(AgentEvent(
         session_id=session.id, kind="SessionStarted", actor="system",
-        payload={"dataset_id": dataset.id},
+        payload={"dataset_id": dataset.id, "llm_probe": probe},
     ))
     await bus.publish(AgentEvent(
         session_id=session.id, kind="DatasetUploaded", actor="system",
-        payload={"dataset_id": dataset.id, "name": dataset.name},
+        payload={"dataset_id": dataset.id, "name": dataset.name, "llm_probe": probe},
     ))
 
-    return DatasetUploadResponse(dataset=dataset, session_id=session.id)
+    return DatasetUploadResponse(
+        dataset=dataset,
+        session_id=session.id,
+        llm_probe=LLMProbe(**probe),
+    )
 
 
 @router.get("", response_model=list[DatasetSchema])

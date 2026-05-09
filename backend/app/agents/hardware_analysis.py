@@ -15,6 +15,15 @@ class HardwareAnalysisAgent(BaseAgent):
 
     async def handle(self, event: AgentEvent) -> None:
         session_id = event.session_id
+        await self.announce(
+            session_id,
+            phase="hardware",
+            title="Probing hardware",
+            summary="Detecting device, VRAM, CUDA / MPS support, and recommending bounds.",
+            steps=["torch.cuda + torch.backends.mps probe", "VRAM total / free", "throughput estimate"],
+            outputs=["hardware artifact"],
+            parent=event.id,
+        )
         await self.emit("HardwareProfileStarted", session_id)
         await self.think(
             session_id,
@@ -38,6 +47,13 @@ class HardwareAnalysisAgent(BaseAgent):
             msg += f" ({info['gpu_name']})"
         await self.emit_message(session_id, msg + ".", parent=event.id)
 
+        await self.complete(
+            session_id,
+            phase="hardware",
+            summary=msg.lstrip("Detected ").rstrip("."),
+            artifacts={"device": device, "vram_gb": vram},
+            parent=event.id,
+        )
         await self.emit(
             "HardwareProfileCompleted",
             session_id,

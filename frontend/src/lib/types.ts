@@ -61,6 +61,16 @@ export type Dataset = {
 export type DatasetUploadResponse = {
   dataset: Dataset;
   session_id: string;
+  llm_probe: LLMProbe;
+};
+
+export type LLMProbe = {
+  ok: boolean;
+  mode: 'full_agent' | 'deterministic' | string;
+  provider: string | null;
+  model: string | null;
+  latency_ms: number;
+  detail: string;
 };
 
 // ── Pipelines ─────────────────────────────────────────────────────────────
@@ -222,6 +232,9 @@ export type EventKind =
   | 'TrainingCompleted' | 'EvaluationStarted' | 'EvaluationCompleted'
   | 'ExportChoiceRequested'
   | 'SaveLocalRequested' | 'PushToHFRequested' | 'ExportCompleted'
+  | 'PhaseStarted' | 'PhaseCompleted'
+  | 'PhasePlanProposed' | 'PhaseApproved' | 'PhaseCommented'
+  | 'NodeMaterialized'
   | 'AgentThinking' | 'AgentPlanning' | 'AgentAsking' | 'AgentGarnishing' | 'AgentExecuting'
   | 'BlackboardUpdated'
   | 'AuditCritique' | 'AuditOverride'

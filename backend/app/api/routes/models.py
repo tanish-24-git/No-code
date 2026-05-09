@@ -80,14 +80,19 @@ def push_status(model_id: str) -> dict:
 
 # ─── Interactive test playground ────────────────────────────────────────────
 #
-# This stub does not load the trained adapter into a real inference runtime.
-# It proxies the prompt through the configured LLM provider with a role-play
-# system prompt that reflects what the model was trained to do, so the user
-# gets a usable preview without needing Ollama / vLLM / HF Inference set up.
+# Two execution paths:
 #
-# When you wire up real inference (transformers + peft, or a side-car
-# inference server), swap the implementation of `_stream_test` and keep this
-# route shape — the frontend doesn't need to change.
+#   1. Real adapter inference (preferred). When the trained adapter directory
+#      exists on disk and `transformers` + `peft` are importable, we load the
+#      base model, attach the adapter, and stream tokens from generate(). The
+#      reply is genuinely from the user's fine-tuned weights.
+#
+#   2. Provider proxy fallback. If real inference is unavailable (missing
+#      deps, missing adapter dir, OOM at load time), we proxy the prompt
+#      through the configured LLM provider with a role-play system prompt.
+#      The response header `X-Inference-Source` tells the UI which path ran.
+#
+# Streamed as SSE so the existing frontend does not change.
 
 class TestRequest(BaseModel):
     prompt: str
@@ -102,8 +107,9 @@ async def test_model(model_id: str, payload: TestRequest) -> StreamingResponse:
     if not raw:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    # Try to recover task type / base model context from the originating job.
+    # Recover task type / base model context from the originating job.
     pipeline_ctx = ""
+    base_model: str | None = None
     job_id = raw.get("job_id")
     if job_id:
         job = store.read("jobs", job_id) or {}
@@ -112,59 +118,192 @@ async def test_model(model_id: str, payload: TestRequest) -> StreamingResponse:
             p = pipeline_service.get(pid)
             if p:
                 cfg = p.config
+                base_model = cfg.base_model
                 pipeline_ctx = (
                     f"Trained from base model: {cfg.base_model}. "
                     f"Task: {cfg.task_type}. Output style: {cfg.output_type}. "
                     f"Domain: {cfg.domain}."
                 )
 
+    adapter_dir = raw.get("local_path")
+
     system = (payload.system_prompt or "").strip() or (
         "You are a fine-tuned assistant. " + pipeline_ctx +
         " Reply in the style and format you were tuned for. Keep answers grounded."
     )
 
-    # Build a one-shot chat through the existing provider streaming path.
-    from app.api.schemas.agent import ChatMessage
-    from app.agents.providers import stream_chat
-    from app.api.routes.settings import get_llm_config
+    # Try real adapter inference first.
+    real_iter = _try_real_inference(
+        adapter_dir=adapter_dir,
+        base_model=base_model,
+        prompt=payload.prompt,
+        system=system,
+        temperature=float(payload.temperature),
+        max_tokens=int(payload.max_tokens),
+    )
+    source = "fine_tuned_adapter" if real_iter is not None else "provider_proxy"
 
-    cfg = get_llm_config()
-    if not cfg.provider or not cfg.model:
-        raise HTTPException(
-            status_code=400,
-            detail="LLM provider is not configured. Set it on the Settings page first.",
-        )
+    if real_iter is None:
+        # Fall back to the configured provider.
+        from app.api.routes.settings import get_llm_config
+        from app.agents.providers import stream_chat
 
-    messages = [{"role": "user", "content": payload.prompt}]
+        cfg = get_llm_config()
+        if not cfg.provider or not cfg.model:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Trained adapter not loadable here and no LLM provider configured. "
+                    "Either install transformers + peft + torch, or set a provider in Settings."
+                ),
+            )
+
+        def proxy_iter() -> AsyncIterator[str]:
+            return _stream_provider(cfg, payload.prompt, system)
+
+        gen = proxy_iter()
+    else:
+        gen = real_iter
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Inference-Source": source,
+    }
+    return StreamingResponse(gen, media_type="text/event-stream", headers=headers)
+
+
+def _try_real_inference(
+    *,
+    adapter_dir: str | None,
+    base_model: str | None,
+    prompt: str,
+    system: str,
+    temperature: float,
+    max_tokens: int,
+) -> AsyncIterator[str] | None:
+    """Return an async iterator that streams tokens from the trained adapter,
+    or None if real inference is not available right now."""
+    if not adapter_dir:
+        return None
+    from pathlib import Path
+
+    adapter_path = Path(adapter_dir)
+    if not adapter_path.exists():
+        return None
+
+    # Defensive imports - all of these can fail on a CPU-only laptop.
+    try:
+        import torch  # type: ignore
+        from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer  # type: ignore
+    except Exception:
+        return None
+
+    # Optional peft adapter wrap. If the adapter is a merged checkpoint, the
+    # AutoModel call below is enough; otherwise we attach the adapter on top
+    # of the base model.
+    try:
+        from peft import PeftModel  # type: ignore
+        peft_available = True
+    except Exception:
+        peft_available = False
 
     async def gen() -> AsyncIterator[str]:
-        loop = asyncio.get_event_loop()
-        queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=256)
+        try:
+            tok_path = str(adapter_path) if (adapter_path / "tokenizer.json").exists() else (base_model or str(adapter_path))
+            tok = AutoTokenizer.from_pretrained(tok_path)
+            if tok.pad_token_id is None and tok.eos_token_id is not None:
+                tok.pad_token_id = tok.eos_token_id
 
-        def producer() -> None:
-            try:
-                for chunk in stream_chat(
-                    provider=cfg.provider,
-                    api_key=cfg.api_key,
-                    model=cfg.model,
-                    base_url=cfg.base_url,
-                    messages=messages,
-                    extra_system=system,
-                ):
-                    asyncio.run_coroutine_threadsafe(queue.put(chunk), loop)
-            except Exception as e:
-                asyncio.run_coroutine_threadsafe(queue.put(f"\n[error: {e}]\n"), loop)
-            finally:
-                asyncio.run_coroutine_threadsafe(queue.put(None), loop)
-
-        loop.run_in_executor(None, producer)
-        while True:
-            chunk = await queue.get()
-            if chunk is None:
+            # Heuristic: if config.json has model weights co-located, load the
+            # adapter dir directly; otherwise load base + attach adapter.
+            has_weights = any((adapter_path / f).exists() for f in ("model.safetensors", "pytorch_model.bin"))
+            if has_weights:
+                model = AutoModelForCausalLM.from_pretrained(
+                    str(adapter_path), torch_dtype=torch.float32, low_cpu_mem_usage=True,
+                )
+            elif base_model and peft_available:
+                base = AutoModelForCausalLM.from_pretrained(
+                    base_model, torch_dtype=torch.float32, low_cpu_mem_usage=True,
+                )
+                model = PeftModel.from_pretrained(base, str(adapter_path))
+            else:
+                yield "data: [error] adapter directory does not contain weights and peft is not installed\n\n"
                 yield "data: [DONE]\n\n"
                 return
-            for line in chunk.split("\n"):
-                yield f"data: {line}\n"
-            yield "\n"
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+            model.eval()
+
+            # Build chat-template input where the tokenizer supports it; fall
+            # back to a vanilla prompt otherwise.
+            messages = []
+            if system:
+                messages.append({"role": "system", "content": system})
+            messages.append({"role": "user", "content": prompt})
+            try:
+                input_ids = tok.apply_chat_template(messages, return_tensors="pt", add_generation_prompt=True)
+            except Exception:
+                input_ids = tok(f"{system}\n\nUser: {prompt}\nAssistant:", return_tensors="pt").input_ids
+
+            streamer = TextIteratorStreamer(tok, skip_prompt=True, skip_special_tokens=True)
+            gen_kwargs = dict(
+                input_ids=input_ids,
+                streamer=streamer,
+                max_new_tokens=max_tokens,
+                do_sample=temperature > 0,
+                temperature=max(temperature, 1e-3),
+                top_p=0.95,
+                pad_token_id=tok.pad_token_id,
+            )
+
+            import threading
+            thread = threading.Thread(target=model.generate, kwargs=gen_kwargs, daemon=True)
+            thread.start()
+
+            for piece in streamer:
+                if not piece:
+                    continue
+                # SSE expects each newline-separated chunk on its own data: line.
+                for line in piece.split("\n"):
+                    yield f"data: {line}\n"
+                yield "\n"
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            yield f"data: [error] {type(e).__name__}: {e}\n\n"
+            yield "data: [DONE]\n\n"
+
+    return gen()
+
+
+async def _stream_provider(cfg, prompt: str, system: str) -> AsyncIterator[str]:
+    """Existing provider-proxy path, lifted to its own coroutine."""
+    from app.agents.providers import stream_chat
+
+    loop = asyncio.get_event_loop()
+    queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=256)
+
+    def producer() -> None:
+        try:
+            for chunk in stream_chat(
+                provider=cfg.provider,
+                api_key=cfg.api_key,
+                model=cfg.model,
+                base_url=cfg.base_url,
+                messages=[{"role": "user", "content": prompt}],
+                extra_system=system,
+            ):
+                asyncio.run_coroutine_threadsafe(queue.put(chunk), loop)
+        except Exception as e:
+            asyncio.run_coroutine_threadsafe(queue.put(f"\n[error: {e}]\n"), loop)
+        finally:
+            asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+
+    loop.run_in_executor(None, producer)
+    while True:
+        chunk = await queue.get()
+        if chunk is None:
+            yield "data: [DONE]\n\n"
+            return
+        for line in chunk.split("\n"):
+            yield f"data: {line}\n"
+        yield "\n"

@@ -25,6 +25,26 @@ class DatasetIntakeAgent(BaseAgent):
         if session and session.state == FSMState.INIT:
             session_service.advance_state(session, FSMState.PROFILING, reason="intake started")
 
+        # Phase narration + canvas pop.
+        await self.announce(
+            session_id,
+            phase="intake",
+            title="Reading your dataset",
+            summary="Inspecting metadata, sampling rows, and bucketing columns by purpose.",
+            steps=[
+                "Read row count and column types",
+                "Sample 3 rows for sanity-check",
+                "Classify columns: instruction-like / input-like / output-like / label-like",
+            ],
+            outputs=["dataset_facts artifact"],
+            parent=event.id,
+        )
+        await self.materialize_node(
+            session_id,
+            {"id": "dataset", "type": "dataset", "position": {"x": 40, "y": 80},
+             "data": {"label": "dataset", "dataset_id": dataset_id}},
+            parent=event.id,
+        )
         await self.emit("IntakeStarted", session_id, payload={"dataset_id": dataset_id})
 
         info = await self.call_tool("dataset.inspect", {"dataset_id": dataset_id}, session_id)
@@ -42,13 +62,26 @@ class DatasetIntakeAgent(BaseAgent):
                 "field_buckets": buckets.get("field_buckets", {}),
             })
 
-        # Friendly chat bubble.
+        # Friendly chat bubble + outcome forecast.
         cols = info.get("column_names", [])
-        col_preview = ", ".join(f"`{c}`" for c in cols[:8]) + ("…" if len(cols) > 8 else "")
+        col_preview = ", ".join(f"`{c}`" for c in cols[:8]) + ("..." if len(cols) > 8 else "")
+        outcomes = _forecast_outcomes(buckets.get("field_buckets", {}), info)
         await self.emit_message(
             session_id,
-            f"Got your dataset **{info.get('name')}** — {info.get('row_count')} rows, "
-            f"{len(cols)} columns ({col_preview}).",
+            (
+                f"Got your dataset **{info.get('name')}** - {info.get('row_count')} rows, "
+                f"{len(cols)} columns ({col_preview}).\n\n"
+                f"**Possible outcomes I can train towards:** {outcomes}"
+            ),
+            parent=event.id,
+        )
+
+        await self.complete(
+            session_id,
+            phase="intake",
+            summary=f"{info.get('row_count', 0)} rows, {len(cols)} columns, "
+                    f"{len(buckets.get('field_buckets', {}).get('output_like', []))} output-like fields",
+            artifacts={"dataset_facts_keys": list((buckets.get("field_buckets") or {}).keys())},
             parent=event.id,
         )
 
@@ -58,3 +91,32 @@ class DatasetIntakeAgent(BaseAgent):
             payload={"dataset_id": dataset_id, "info": info, "field_buckets": buckets.get("field_buckets", {})},
             parent_event_id=event.id,
         )
+
+
+def _forecast_outcomes(buckets: dict, info: dict) -> str:
+    """A short, friendly forecast of what this dataset can train for."""
+    has_instruction = bool(buckets.get("instruction_like"))
+    has_input = bool(buckets.get("input_like"))
+    has_output = bool(buckets.get("output_like"))
+    has_label = bool(buckets.get("label_like"))
+    rows = int(info.get("row_count") or 0)
+
+    options: list[str] = []
+    if has_instruction and has_output:
+        options.append("instruction-following / chat fine-tune")
+    if has_input and has_output:
+        options.append("input-output transformation (translation, summarization, rewrite)")
+    if has_label:
+        options.append("classification / intent detection")
+    if has_input and not has_output and not has_label:
+        options.append("language modeling on free-text continuation")
+    if not options:
+        options.append("general continuation tuning")
+
+    if rows < 200:
+        warning = " (small dataset - synthetic augmentation recommended)"
+    elif rows > 100_000:
+        warning = " (large dataset - QLoRA + 1 epoch recommended)"
+    else:
+        warning = ""
+    return ", ".join(options) + warning

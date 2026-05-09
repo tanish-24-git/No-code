@@ -37,18 +37,18 @@ EventKind = Literal[
     "ExportChoiceRequested",
     "SaveLocalRequested", "PushToHFRequested",
     "ExportCompleted",
-    # ── Socratic / interactive streaming kinds ────────────────────────────
-    # See blueprint §3.1. payload.stream is one of:
-    #   "thinking"   — internal reasoning trace ("I am currently…")
-    #   "planning"   — step-by-step task breakdown
-    #   "asking"     — interactive dialogue ⇒ pauses execution until user answers
-    #   "garnishing" — UI finalization (nodes, edges, animations)
-    #   "executing"  — live execution log tail
-    "AgentThinking",            # purple in UI
-    "AgentPlanning",            # blue in UI
-    "AgentAsking",              # yellow in UI; pairs with UserClarificationRequested
-    "AgentGarnishing",          # cyan in UI; one per node animation step
-    "AgentExecuting",           # green in UI; live tail
+    # ── Phase narration (Antigravity-style per-phase plan + approval) ─────
+    "PhaseStarted", "PhaseCompleted",
+    "PhasePlanProposed", "PhaseApproved", "PhaseCommented",
+    "NodeMaterialized",          # canvas should pop a node into existence
+    # ── Streaming kinds (used by audit / sandbox / alchemy agents) ────────
+    # payload.stream is one of:
+    #   "thinking" / "planning" / "asking" / "garnishing" / "executing"
+    "AgentThinking",
+    "AgentPlanning",
+    "AgentAsking",
+    "AgentGarnishing",
+    "AgentExecuting",
     # ── Hierarchy / collaboration ─────────────────────────────────────────
     "BlackboardUpdated",        # any agent posts to the federated blackboard
     "AuditCritique",            # Audit Agent (Critic) reviews a plan

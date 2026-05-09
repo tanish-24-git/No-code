@@ -25,14 +25,27 @@ class DatasetProfilingAgent(BaseAgent):
         if not dataset_id:
             return
 
-        await self.emit("DatasetProfileStarted", session_id, payload={"dataset_id": dataset_id})
-        await self.think(
+        await self.announce(
             session_id,
-            "Computing token-length distribution, exact-row hash dedup, "
-            "per-column missing rates, and class balance.",
+            phase="profile",
+            title="Profiling the dataset",
+            summary="Computing token-length distribution, duplicates, missing values, and class balance.",
+            steps=[
+                "Whitespace token-length p50/p95/max",
+                "Exact-row hash dedup",
+                "Per-column missing-rate",
+                "Low-cardinality column class balance",
+            ],
+            outputs=["profile artifact (tokens, duplicates, missing, imbalance)"],
             parent=event.id,
         )
-        await self.emit_message(session_id, "Profiling token lengths, duplicates, missing values, and class balance…", parent=event.id)
+        await self.materialize_node(
+            session_id,
+            {"id": "preprocess", "type": "preprocess", "position": {"x": 360, "y": 80},
+             "data": {"label": "profile + clean"}},
+            parent=event.id,
+        )
+        await self.emit("DatasetProfileStarted", session_id, payload={"dataset_id": dataset_id})
 
         tokens = await self.call_tool("dataset.profile_tokens", {"dataset_id": dataset_id}, session_id)
         dupes = await self.call_tool("dataset.detect_duplicates", {"dataset_id": dataset_id}, session_id)
@@ -62,6 +75,13 @@ class DatasetProfilingAgent(BaseAgent):
         if bits:
             await self.emit_message(session_id, "Profile: " + ", ".join(bits) + ".", parent=event.id)
 
+        await self.complete(
+            session_id,
+            phase="profile",
+            summary=", ".join(bits) if bits else "profile complete",
+            artifacts={"row_count": profile["row_count"], "p95": profile.get("p95")},
+            parent=event.id,
+        )
         await self.emit(
             "DatasetProfileCompleted",
             session_id,

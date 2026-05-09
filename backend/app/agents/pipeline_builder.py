@@ -33,6 +33,34 @@ class PipelineBuilderAgent(BaseAgent):
         if not ds:
             await self.emit_error(session_id, "dataset missing for session")
             return
+        # Refuse to silently fall back to a hardcoded model. The model search
+        # phase must populate chosen_model before we can lay down a pipeline.
+        if not chosen_model.get("repo_id"):
+            await self.emit_error(
+                session_id,
+                "pipeline_builder cannot proceed without a chosen base model. "
+                "Model search did not return a candidate that fits this hardware.",
+            )
+            return
+
+        await self.announce(
+            session_id,
+            phase="plan",
+            title="Drafting the pipeline",
+            summary=(
+                f"Wiring dataset -> preprocess -> train ({chosen_model.get('repo_id')}) -> "
+                "evaluate -> export. You'll be asked to approve before training starts."
+            ),
+            steps=[
+                "Create pipeline record and apply config",
+                "Build the node graph based on profile (balance / split / train / eval / export)",
+                "Pop each node onto the canvas",
+                "Summarize for your approval",
+            ],
+            outputs=["pipeline draft", "node graph"],
+            requires_approval=True,
+            parent=event.id,
+        )
 
         # 1. Create pipeline.
         if not session.pipeline_id:
@@ -71,10 +99,10 @@ class PipelineBuilderAgent(BaseAgent):
             session_id,
         )
 
-        # 3b. Garnishing — stream node materialization to the UI so the
-        # ReactFlow canvas pops each node into existence with a glow.
+        # 3b. Pop each node into the canvas one-by-one so the user sees the
+        # graph grow as the agent decides on it.
         for n in nodes:
-            await self.garnish(session_id, n, parent=event.id)
+            await self.materialize_node(session_id, n, parent=event.id)
 
         # 4. Build a human-readable summary card.
         est_minutes = float(event.payload.get("estimated_minutes") or 0.0)
@@ -87,6 +115,13 @@ class PipelineBuilderAgent(BaseAgent):
         if session.state == FSMState.PROFILING or session.state == FSMState.CLARIFYING:
             session_service.advance_state(session, FSMState.PLANNING, reason="building draft")
 
+        await self.complete(
+            session_id,
+            phase="plan",
+            summary=summary.get("title", "pipeline draft ready"),
+            artifacts={"pipeline_id": session.pipeline_id, "node_count": len(nodes)},
+            parent=event.id,
+        )
         await self.emit(
             "PipelineDraftCreated",
             session_id,
@@ -103,12 +138,17 @@ class PipelineBuilderAgent(BaseAgent):
     # ── builders ──────────────────────────────────────────────────────────
 
     def _build_config(self, model, strategy, profile, session) -> dict:
+        # Caller already guarded chosen_model; assert here so a regression
+        # surfaces loudly instead of training on the wrong base.
+        repo_id = model.get("repo_id")
+        if not repo_id:
+            raise ValueError("chosen_model has no repo_id - upstream selection failed")
         return {
             "project_name": f"auto-{session.id[:8]}",
             "dataset_id": session.dataset_id,
             "task_type": strategy.get("task_type") or "Chat",
             "training_method": strategy.get("method") or "lora",
-            "base_model": model.get("repo_id") or "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            "base_model": repo_id,
             "epochs": int(strategy.get("epochs") or 3),
             "batch_size": int(strategy.get("batch_size") or 4),
             "learning_rate": float(strategy.get("learning_rate") or 2e-4),
@@ -126,7 +166,7 @@ class PipelineBuilderAgent(BaseAgent):
             "precision": f"{strategy.get('precision')} per device support",
             "max_seq_len": f"clipped to dataset p95 ({profile.get('p95')}) and model.max_pos",
             "epochs": f"{strategy.get('epochs')} balances dataset size vs runtime",
-            "batch_size": f"{strategy.get('batch_size')}×{strategy.get('gradient_accumulation')} fits VRAM budget",
+            "batch_size": f"{strategy.get('batch_size')}x{strategy.get('gradient_accumulation')} fits VRAM budget",
         }
 
     def _build_graph(self, dataset_id, profile, strategy):

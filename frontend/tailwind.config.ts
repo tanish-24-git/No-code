@@ -31,8 +31,8 @@ const config: Config = {
       },
       animation: {
         pulse: 'pulse 2.5s ease-in-out infinite',
-        'pop-in': 'pop-in 0.45s cubic-bezier(0.34, 1.56, 0.64, 1)',
-        'fade-in': 'fade-in 0.4s ease-out',
+        'pop-in': 'pop-in 0.35s cubic-bezier(0.34, 1.56, 0.64, 1)',
+        'fade-in': 'fade-in 0.3s ease-out',
         glow: 'glow 1.6s ease-out',
       },
       keyframes: {
