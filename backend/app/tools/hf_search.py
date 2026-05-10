@@ -84,6 +84,7 @@ def _task_to_hf_task(task: str) -> str:
         "type": "object",
         "properties": {
             "task": {"type": "string", "default": "instruction"},
+            "query": {"type": "string"},
             "hardware": {"type": "object"},
             "instruct_only": {"type": "boolean", "default": True},
             "top_n": {"type": "integer", "default": 12},
@@ -96,6 +97,7 @@ def _task_to_hf_task(task: str) -> str:
 )
 async def model_search_hf(args: dict[str, Any], _ctx: ToolContext) -> dict[str, Any]:
     task = (args.get("task") or "instruction").lower()
+    query = args.get("query")
     hw = args.get("hardware") or {}
     instruct_only = bool(args.get("instruct_only", True))
     top_n = int(args.get("top_n", 12))
@@ -103,8 +105,7 @@ async def model_search_hf(args: dict[str, Any], _ctx: ToolContext) -> dict[str, 
 
     hf_task = _task_to_hf_task(task)
 
-    # 1. Attempt a live Hub search. Wrapped in a defensive try so a missing
-    # dep / firewall / rate-limit silently falls back to the curated list.
+    # 1. Attempt a live Hub search.
     candidates: list[dict[str, Any]] = []
     source = "fallback_catalog"
     error: str | None = None
@@ -114,9 +115,8 @@ async def model_search_hf(args: dict[str, Any], _ctx: ToolContext) -> dict[str, 
         from app.api.routes.settings import get_hf_token
 
         api = HfApi(token=get_hf_token() or None)
-        # `instruct` keyword is the closest stable lever we have today; many
-        # popular tunes carry "Instruct" or "Chat" in the repo id.
-        search_terms = "instruct" if instruct_only else None
+        # Use the explicit query if provided, else fallback to 'instruct'.
+        search_terms = query if query else ("instruct" if instruct_only else None)
         listed = list(
             api.list_models(
                 task=hf_task,
@@ -132,7 +132,6 @@ async def model_search_hf(args: dict[str, Any], _ctx: ToolContext) -> dict[str, 
                 continue
             params_b = _params_b_from_id(repo_id)
             if params_b is None:
-                # Without a size hint we can't reason about VRAM fit.
                 continue
             if params_b > budget * 1.05:
                 continue
@@ -155,8 +154,8 @@ async def model_search_hf(args: dict[str, Any], _ctx: ToolContext) -> dict[str, 
     except Exception as e:
         error = f"{type(e).__name__}: {str(e)[:200]}"
 
-    if not candidates:
-        candidates = _from_catalog(budget, hf_task, top_n)
+    if not candidates and not error:
+        error = "No models found matching your criteria on HuggingFace Hub."
 
     # Sort: smaller models first when budget is tight, then by popularity.
     candidates.sort(key=lambda r: (-r.get("downloads", 0), r["params_b"]))
@@ -180,27 +179,3 @@ def _looks_instruct(repo_id: str, tags: list[str]) -> bool:
 
 def _label_from_id(repo_id: str) -> str:
     return repo_id.split("/")[-1]
-
-
-def _from_catalog(budget: float, hf_task: str, top_n: int) -> list[dict[str, Any]]:
-    """Drop back to the curated list when HF search fails. Mirrors the shape
-    of a HF Hub result so downstream ranking code does not need to branch."""
-    from app.tools.model import CATALOG
-
-    out: list[dict[str, Any]] = []
-    for spec in CATALOG:
-        if spec.params_b > budget * 1.05:
-            continue
-        out.append({
-            "repo_id": spec.repo_id,
-            "label": spec.label,
-            "params_b": spec.params_b,
-            "downloads": 0,
-            "likes": 0,
-            "tags": [spec.family],
-            "source": "fallback_catalog",
-            "max_pos": spec.max_pos,
-        })
-        if len(out) >= top_n:
-            break
-    return out

@@ -38,70 +38,85 @@ class TrainingStrategyAgent(BaseAgent):
             parent=event.id,
         )
 
+        # Stage 1: Socratic Deliberation.
+        await self.think(session_id, "Deliberating on the optimal training architecture for your dataset and hardware...", parent=event.id)
+        
+        # We start by asking the LLM to propose a strategy from scratch, 
+        # instead of relying on a deterministic baseline.
+        deliberation_prompt = (
+            f"Dataset Profile: {profile.get('row_count')} rows.\n"
+            f"Hardware: {hw.get('device')} / {hw.get('vram_gb')}GB VRAM.\n"
+            f"Model: {chosen_model.get('repo_id')} ({chosen_model.get('params_b')}B params)\n"
+            f"Task: {task.get('chosen')}\n\n"
+            "Propose a SOTA training strategy. CRITICAL: NEVER use float32 precision; use float16 or bf16 (if hardware supports it). "
+            "For small datasets, use 3-5 epochs. For LoRA, suggest a rank like 16 or 32. "
+            "Return a JSON object with: method, adapter_variant, precision, batch_size, gradient_accumulation, learning_rate, epochs, and a short 'rationale'."
+        )
+        
+        strategy = {}
+        if session.llm_provider:
+            try:
+                res = await self.call_llm(session_id, deliberation_prompt, system="You are a SOTA MLOps Architect.", parent=event.id)
+                m = re.search(r"\{.*\}", res, re.DOTALL)
+                if m:
+                    strategy = json.loads(m.group(0))
+            except Exception:
+                pass
+        
+        # Fallback to tool if LLM fails or returned incomplete JSON
+        if not strategy.get("method"):
+            strategy = await self.call_tool(
+                "strategy.choose",
+                {"model": chosen_model, "hardware": hw, "profile": profile, "task": task, "priority": priority},
+                session_id,
+            )
+
+        # Present the strategy for approval.
+        stack_bits = [strategy.get("method", "PEFT")]
+        if strategy.get("adapter_variant") and strategy["adapter_variant"] != "none":
+            stack_bits.append(f"+{strategy['adapter_variant'].upper()}")
+        stack = " ".join(stack_bits)
+
         await self.announce(
             session_id,
             phase="strategy",
-            title="Picking a training strategy",
+            title="Training Strategy",
             summary=(
-                f"Choosing PEFT method, precision, batch size, and seq length "
-                f"for {chosen_model.get('repo_id', 'the chosen model')} on "
-                f"{hw.get('device', 'cpu').upper()}."
+                f"I've deliberated on your setup and propose a **{stack}** stack.\n\n"
+                f"**Rationale:** {strategy.get('rationale', 'Optimized for your VRAM and data size.')}\n\n"
+                f"- Precision: {strategy.get('precision', 'auto')}\n"
+                f"- Batch size: {strategy.get('batch_size')} (Accumulation: {strategy.get('gradient_accumulation')})\n"
+                f"- Learning rate: {strategy.get('learning_rate', 'auto')}\n\n"
+                "Does this architectural plan work for you? You can approve or comment to request changes (e.g., 'increase LR', 'use GaLore instead')."
             ),
-            steps=[
-                "Pick LoRA / QLoRA / DoRA based on VRAM headroom",
-                "Set precision (bf16/fp16/fp32) by device support",
-                "Compute batch * grad_accum to fit VRAM",
-                "Deliberate on SOTA-2026 variants (DoRA, GaLore, Unsloth)",
-            ],
-            outputs=["strategy artifact", "runtime_estimate"],
+            steps=["Analyze VRAM-to-parameter ratio", "Select optimal PEFT variant", "Compute gradient accumulation bounds"],
             requires_approval=True,
             parent=event.id,
         )
 
         comment = await self.wait_for_approval(session_id, "strategy")
-        if comment:
-            await self.think(session_id, f"User strategy feedback: {comment}")
-
-        await self.think(session_id, "Deliberating on the best SOTA stack for your hardware...")
-
-        # Get the tool-based baseline.
-        strategy = await self.call_tool(
-            "strategy.choose",
-            {"model": chosen_model, "hardware": hw, "profile": profile, "task": task, "priority": priority},
-            session_id,
-        )
-
-        # In full agent mode, let the LLM refine the strategy.
-        if session.llm_provider:
+        if comment and session.llm_provider:
+            await self.think(session_id, f"Re-deliberating strategy based on your feedback: '{comment}'")
             prompt = (
-                f"Dataset: {profile.get('row_count')} rows, {profile.get('p95')} p95 tokens.\n"
-                f"Model: {chosen_model.get('repo_id')} ({chosen_model.get('params_b')}B params).\n"
-                f"Hardware: {hw.get('device')} with {hw.get('vram_gb')}GB VRAM.\n"
-                f"Baseline Strategy: {json.dumps(strategy)}\n\n"
-                f"Refine this strategy. Should we use DoRA, GaLore, or Unsloth? "
-                f"Explain your reasoning. Return the final strategy as a JSON object."
+                f"Current strategy: {json.dumps(strategy)}\n"
+                f"User feedback: '{comment}'\n\n"
+                "Adjust the strategy JSON according to the feedback. Return ONLY the new JSON object."
             )
             try:
-                refined_text = await self.call_llm(
-                    session_id,
-                    prompt,
-                    system="You are a SOTA training architect. Return ONLY the refined JSON strategy.",
-                    parent=event.id,
-                )
-                m = re.search(r"\{.*\}", refined_text, re.DOTALL)
+                adjusted_text = await self.call_llm(session_id, prompt, system="You are a flexible MLOps assistant.", parent=event.id)
+                m = re.search(r"\{.*\}", adjusted_text, re.DOTALL)
                 if m:
                     strategy = json.loads(m.group(0))
+                    await self.think(session_id, f"Strategy adjusted. I've updated the {', '.join(strategy.keys())} as requested.")
             except Exception:
                 pass
-        if "error" in strategy:
-            await self.emit_error(session_id, strategy["error"])
-            return
 
         runtime = await self.call_tool(
             "strategy.estimate_runtime",
             {"strategy": strategy, "hardware": hw, "profile": profile, "model": chosen_model},
             session_id,
         )
+
         est_min = float(runtime.get("estimated_minutes", 0.0))
 
         session_service.attach_artifact(session, "strategy", strategy)
@@ -111,37 +126,17 @@ class TrainingStrategyAgent(BaseAgent):
             session_id=session_id,
             agent=self.name,
             kind="strategy",
-            inputs={"hardware": hw, "profile": profile, "model": chosen_model, "priority": priority},
+            inputs={"hardware": hw, "profile": profile, "model": chosen_model, "comment": comment},
             chosen=strategy,
-            confidence=0.7,
-            rationale=f"priority={priority}",
-        )
-
-        # Plan card with the SOTA stack so the user sees DoRA/GaLore/Unsloth.
-        stack_bits = [strategy["method"]]
-        if strategy.get("adapter_variant") and strategy["adapter_variant"] != "none":
-            stack_bits.append(f"+{strategy['adapter_variant'].upper()}")
-        if strategy.get("kernel_pack") and strategy["kernel_pack"] != "standard":
-            stack_bits.append(f"-{strategy['kernel_pack']}")
-        if strategy.get("quantization") and strategy["quantization"] != "none":
-            stack_bits.append(f"-{strategy['quantization']}")
-        stack = " ".join(stack_bits)
-
-        await self.emit_message(
-            session_id,
-            f"Strategy: **{stack}** / {strategy['precision']} / "
-            f"batch {strategy['batch_size']}x{strategy['gradient_accumulation']} grad accum / "
-            f"seq {strategy['max_seq_len']} / {strategy['epochs']}ep. "
-            f"~{est_min:.1f} min estimated.",
-            parent=event.id,
+            confidence=0.9,
+            rationale=f"AI-refined strategy based on hardware/priority",
         )
 
         await self.complete(
             session_id,
             phase="strategy",
-            summary=f"{strategy['method']} / {strategy['precision']} / "
-                    f"~{est_min:.1f} min estimated",
-            artifacts={"method": strategy["method"], "precision": strategy["precision"]},
+            summary=f"Finalized {strategy.get('method')} strategy",
+            artifacts={"method": strategy.get("method")},
             parent=event.id,
         )
         await self.emit(
@@ -157,3 +152,4 @@ class TrainingStrategyAgent(BaseAgent):
             if a.question_id == "q_priority":
                 return str(a.value)
         return None
+

@@ -40,74 +40,32 @@ class ModelSelectionAgent(BaseAgent):
         if session.artifacts.get("candidate_models"):
             return  # Already done.
 
-        await self.announce(
-            session_id,
-            phase="model_search",
-            title="Searching HuggingFace for the right base model",
-            summary=(
-                f"Scanning the Hub for instruct-tuned candidates that fit your "
-                f"{hw.get('device', 'cpu').upper()} budget and "
-                f"{task.get('chosen', 'task')} workload."
-            ),
-            steps=[
-                "Filter by task and 'instruct' tag",
-                "Cap parameter count to fit your VRAM",
-                "Score each candidate against (hardware, profile, task)",
-                "Pick the highest-scoring fit",
-            ],
-            outputs=["chosen_model artifact", "candidate_models shortlist"],
-            requires_approval=True,
-            parent=event.id,
-        )
-
-        await self.materialize_node(
-            session_id,
-            {"id": "model", "type": "config", "position": {"x": 240, "y": 200}, "data": {"label": "base model"}},
-            parent=event.id,
-        )
-        await self.materialize_edge(
-            session_id,
-            {"id": "e-preprocess-model", "source": "preprocess", "target": "model", "animated": True},
-            parent=event.id,
-        )
-
-        comment = await self.wait_for_approval(session_id, "model_search")
-        if comment:
-            await self.think(session_id, f"User model search feedback: {comment}")
-
-        # Stage 1: live Hub search (or fallback catalogue).
+        # Stage 1: live Hub search.
+        await self.think(session_id, "Searching HuggingFace Hub for models that fit your data...", parent=event.id)
+        
+        chosen_task = task.get("chosen", "instruction")
+        # If the task is specialized (e.g. stock price, medical), use it as a query.
+        is_specialized = chosen_task not in ("instruction", "chat", "qa", "classification", "extraction")
+        
         searched = await self.call_tool(
             "model.search_hf",
             {
-                "task": task.get("chosen", "instruction"),
+                "task": chosen_task,
+                "query": chosen_task if is_specialized else None,
                 "hardware": hw,
-                "instruct_only": True,
+                "instruct_only": not is_specialized, # Don't limit to instruct if specialized
                 "top_n": 12,
             },
             session_id,
         )
+
+
         if "error" in searched and not searched.get("candidates"):
             await self.emit_error(session_id, searched["error"])
             return
 
         hub_candidates = searched.get("candidates") or []
-        await self.emit_message(
-            session_id,
-            (
-                f"Searched HuggingFace ({searched.get('source', 'hub')}): "
-                f"{len(hub_candidates)} candidate base models within "
-                f"{searched.get('max_params_b', '?')}B parameters."
-            ),
-            parent=event.id,
-        )
-        if not hub_candidates:
-            await self.emit_error(
-                session_id,
-                "no candidate models fit the device budget - "
-                "consider attaching a GPU or asking for a smaller model family",
-            )
-            return
-
+        
         # Stage 2: deterministic ranking against the joint context.
         ranked = await self.call_tool(
             "model.rank_candidates",
@@ -115,7 +73,7 @@ class ModelSelectionAgent(BaseAgent):
                 "hardware": hw,
                 "profile": profile,
                 "task": task,
-                "top_n": 5,
+                "top_n": 10,
                 "shortlist": hub_candidates,
             },
             session_id,
@@ -129,7 +87,56 @@ class ModelSelectionAgent(BaseAgent):
             await self.emit_error(session_id, "no candidate models scored above the fit threshold")
             return
 
+        # Present the candidates to the user.
+        candidate_list_str = "\n".join([f"{i+1}. {c['label']} ({c['repo_id']}) - {c['params_b']}B" for i, c in enumerate(candidates[:5])])
+        
+        await self.announce(
+            session_id,
+            phase="model_search",
+            title="Model Selection",
+            summary=(
+                f"I've found {len(candidates)} candidates. The top recommendation is **{candidates[0]['label']}**. "
+                f"You can approve this or comment to pick another one from the list:\n\n{candidate_list_str}"
+            ),
+            steps=[
+                "Filter Hub for instruct-tuned models",
+                "Rank by VRAM and parameter efficiency",
+                "Validate chat template compatibility"
+            ],
+            requires_approval=True,
+            parent=event.id,
+        )
+
         chosen = candidates[0]
+        comment = await self.wait_for_approval(session_id, "model_search")
+
+        
+        if comment and session.llm_provider:
+            await self.think(session_id, f"Processing your feedback: '{comment}'")
+            # Use LLM to resolve the chosen model from the comment.
+            prompt = (
+                f"User feedback: '{comment}'\n\n"
+                f"Top Candidates:\n{candidate_list_str}\n\n"
+                "The user wants to pick a model. Identify the HuggingFace repo_id (e.g., 'meta-llama/Llama-3.2-1B-Instruct') "
+                "they are asking for. Return ONLY the repo_id. If they aren't asking for a specific model, "
+                "return the current choice."
+            )
+            resolved_id = await self.call_llm(session_id, prompt, system="You are an expert model identifier.", parent=event.id)
+            resolved_id = resolved_id.strip().strip('"').strip("'").split(" ")[0] # Grab first word/id
+            
+            # 1. Check top candidates
+            match = next((c for c in candidates if resolved_id.lower() in c['repo_id'].lower()), None)
+            
+            # 2. Check full search results if not in top candidates
+            if not match:
+                full_list = searched.get("candidates", [])
+                match = next((c for c in full_list if resolved_id.lower() in c['repo_id'].lower()), None)
+            
+            if match:
+                chosen = match
+                await self.think(session_id, f"Switching choice to **{chosen['label']}** ({chosen['repo_id']}) based on your feedback.")
+            else:
+                await self.think(session_id, f"I couldn't find a model matching '{resolved_id}' in the Hub search results. Keeping **{chosen['label']}**.")
 
         session_service.attach_artifact(session, "candidate_models", candidates)
         session_service.attach_artifact(session, "chosen_model", chosen)
@@ -138,30 +145,26 @@ class ModelSelectionAgent(BaseAgent):
             session_id=session_id,
             agent=self.name,
             kind="model_choice",
-            inputs={"hardware": hw, "profile": profile, "task": task, "search_source": searched.get("source")},
+            inputs={"hardware": hw, "profile": profile, "task": task, "comment": comment},
             candidates=candidates,
             chosen=chosen.get("repo_id"),
             confidence=float(chosen.get("score", 0.0)),
             rationale="; ".join(chosen.get("reasons", [])),
         )
 
-        await self.emit_message(
-            session_id,
-            f"Top candidate: **{chosen['label']}** ({chosen['repo_id']}) - "
-            f"reasons: {', '.join(chosen.get('reasons', [])[:3])}.",
-            parent=event.id,
-        )
         await self.complete(
             session_id,
             phase="model_search",
-            summary=f"chose {chosen['repo_id']} ({chosen['params_b']}B params)",
-            artifacts={"chosen_repo_id": chosen.get("repo_id"), "score": chosen.get("score")},
+            summary=f"Selected {chosen['repo_id']}",
+            artifacts={"chosen_repo_id": chosen.get("repo_id")},
             parent=event.id,
         )
+
         await self.emit(
             "CandidateModelsRanked",
             session_id,
-            payload={"candidates": candidates, "chosen": chosen, "search_source": searched.get("source")},
+            payload={"candidates": candidates, "chosen": chosen},
             parent_event_id=event.id,
             decision_id=d.id,
         )
+

@@ -30,6 +30,7 @@ def stream_anthropic(
     base_url: str,
     system: str,
     messages: list[dict[str, Any]],
+    use_tools: bool = True,
 ) -> Iterator[str]:
     """Anthropic Messages API with tool use."""
     from anthropic import Anthropic
@@ -38,10 +39,12 @@ def stream_anthropic(
     tools = [
         {"name": t.name, "description": t.description, "input_schema": t.input_schema}
         for t in TOOLS
-    ]
+    ] if use_tools else []
     history = list(messages)
 
     for _hop in range(8):
+        # We need to filter tool-result messages to ensure they follow tool-use messages.
+        # Anthropic is very strict about this.
         with client.messages.stream(
             model=model,
             max_tokens=2048,
@@ -80,6 +83,7 @@ def stream_openai(
     base_url: str,
     system: str,
     messages: list[dict[str, Any]],
+    use_tools: bool = True,
 ) -> Iterator[str]:
     """OpenAI Chat Completions API with tool use. base_url lets this provider
     drive Ollama, LM Studio, vLLM, OpenRouter, Together, Groq, etc."""
@@ -96,7 +100,7 @@ def stream_openai(
             },
         }
         for t in TOOLS
-    ]
+    ] if use_tools else []
 
     history: list[dict[str, Any]] = [{"role": "system", "content": system}]
     for m in messages:
@@ -109,7 +113,7 @@ def stream_openai(
         stream = client.chat.completions.create(
             model=model,
             messages=history,
-            tools=tools,
+            tools=tools if tools else None,
             stream=True,
         )
 
@@ -171,6 +175,7 @@ def stream_chat(
     model: str,
     base_url: str,
     messages: list[dict[str, Any]],
+    use_tools: bool = True,
     extra_system: str = "",
 ) -> Iterator[str]:
     """Look up the provider in the registry, resolve engine + base URL,
@@ -187,6 +192,7 @@ def stream_chat(
             base_url=resolved_base,
             system=system,
             messages=messages,
+            use_tools=use_tools,
         )
         return
     if engine == "openai":
@@ -196,6 +202,7 @@ def stream_chat(
             base_url=resolved_base,
             system=system,
             messages=messages,
+            use_tools=use_tools,
         )
         return
     raise ValueError(f"Unknown engine for provider {provider!r}: {engine}")

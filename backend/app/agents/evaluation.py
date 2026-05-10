@@ -50,19 +50,38 @@ class EvaluationAgent(BaseAgent):
         evaluation = {**result, "vs_baseline": compare}
         session_service.attach_artifact(session, "evaluation", evaluation)
 
-        await self.emit_message(
-            session_id,
-            f"Evaluation: final loss {result.get('final_loss')}, score "
-            f"{result.get('score')}; baseline delta {compare.get('delta')}.",
-            parent=event.id,
+        # Deliberate on the evaluation summary.
+        prompt = (
+            f"Evaluation results for job {session.job_id}:\n"
+            f"Final loss: {result.get('final_loss')}\n"
+            f"Score: {result.get('score')}\n"
+            f"Baseline delta: {compare.get('delta')}\n\n"
+            "Summarize these results. Mention if the model improved over the baseline. "
+            "Be concise and professional."
         )
+        
+        summary_msg = f"Evaluation: score {result.get('score')}, baseline delta {compare.get('delta')}"
+        if session.llm_provider:
+            try:
+                summary_msg = await self.call_llm(
+                    session_id,
+                    prompt,
+                    system="You are an ML evaluator. Summarize the model's performance.",
+                    parent=event.id
+                )
+            except Exception:
+                pass
+
+        await self.emit_message(session_id, summary_msg, parent=event.id)
+        
         await self.complete(
             session_id,
             phase="evaluate",
-            summary=f"score {result.get('score')}, baseline delta {compare.get('delta')}",
+            summary=summary_msg[:100],
             artifacts={"score": result.get("score")},
             parent=event.id,
         )
+
         await self.emit(
             "EvaluationCompleted",
             session_id,

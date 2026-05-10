@@ -42,7 +42,31 @@ class TrainingMonitorAgent(BaseAgent):
             return
         metrics = metrics_resp.get("metrics") or []
 
+        # Deterministic check for hard failures (OOM, etc)
         anomaly = await self.call_tool("metrics.detect_anomaly", {"metrics": metrics, "window": 5}, session_id)
+        
+        # LLM check for "soft" failures (stagnating loss, bad convergence)
+        if session.llm_provider and metrics and not anomaly.get("anomaly"):
+            await self.think(session_id, "Analyzing training metrics for subtle health issues...", parent=event.id)
+            metrics_summary = "\n".join([f"Step {m['step']}: loss={m.get('loss')}, eval_loss={m.get('eval_loss')}" for m in metrics[-10:]])
+            prompt = (
+                f"Recent metrics:\n{metrics_summary}\n\n"
+                "As an AI training supervisor, is this training progressing well? "
+                "Look for: stagnating loss, exploding loss, or widening gap between train/eval. "
+                "If it's failing, return a JSON object with 'anomaly': true, 'reason': 'detailed explanation'. "
+                "Otherwise return 'anomaly': false."
+            )
+            try:
+                import json, re
+                res = await self.call_llm(session_id, prompt, system="You are an expert MLOps monitor.", parent=event.id)
+                m = re.search(r"\{.*\}", res, re.DOTALL)
+                if m:
+                    llm_anomaly = json.loads(m.group(0))
+                    if llm_anomaly.get("anomaly"):
+                        anomaly = {"anomaly": True, "reason": llm_anomaly.get("reason")}
+            except Exception:
+                pass
+
         if anomaly.get("anomaly"):
             await self.emit(
                 "TrainingAnomalyDetected",
@@ -65,3 +89,4 @@ class TrainingMonitorAgent(BaseAgent):
                 session_service.fail(session, f"job {job_id} failed")
             elif status == "stopped":
                 await self.emit_message(session_id, "Training stopped.", parent=event.id)
+

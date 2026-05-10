@@ -42,46 +42,42 @@ class TaskInferenceAgent(BaseAgent):
         )
 
         comment = await self.wait_for_approval(session_id, "task")
-        if comment:
-            await self.think(session_id, f"User task inference feedback: {comment}")
-
-        # If user has answered q_task_type, take their answer as ground truth.
-        forced_task = self._user_chose_task(session)
-        if forced_task:
-            chosen = forced_task
-            scores = {chosen: 1.0}
-            confidence = 1.0
-            missing = self._missing_after_user(session, buckets, imbalance)
-            await self.think(session_id, f"Using user-specified task: {chosen}")
-        else:
-            await self.think_delta(session_id, "Analyzing dataset structure to infer the best training task...", is_final=False, parent=event.id)
-            
-            prompt = f"Given a dataset with {info.get('row_count', 0)} rows and column types {info.get('column_types', {})}, what is the best task type (e.g. instruction, chat, regression, classification, qa)? Return ONLY a JSON object with 'chosen' (string), 'scores' (dict of string:float), and 'confidence' (float)."
-            system_prompt = "You are a machine learning data architect. You analyze raw dataset signals and infer the task type."
-            
+        
+        await self.think_delta(session_id, "Analyzing dataset structure and incorporating feedback to infer the best training task...", is_final=False, parent=event.id)
+        
+        # Build a dynamic prompt that includes user feedback
+        prompt = (
+            f"Dataset Summary: {info.get('row_count', 0)} rows, columns: {info.get('column_types', {})}.\n"
+            f"User Feedback: '{comment}'\n\n"
+            "Based on the data signals and user feedback, what is the best task type for fine-tuning? "
+            "Possible types: instruction, chat, regression, classification, qa, summarization, extraction, etc. "
+            "If the user suggested a transformation (e.g. 'convert to chat'), pick that as the 'chosen' task. "
+            "Return ONLY a JSON object with 'chosen' (string), 'scores' (dict), and 'confidence' (float)."
+        )
+        system_prompt = "You are a machine learning data architect. You are adaptive, reasoning like a human about the user's goals."
+        
+        try:
             result_str = await self.call_llm(session_id, prompt, system=system_prompt, stream_thoughts=True, parent=event.id)
+            import json, re
+            m = re.search(r"\{.*\}", result_str, re.DOTALL)
+            if not m:
+                raise ValueError("LLM returned non-JSON task inference")
             
-            # Fallback parsing in case of poor JSON formatting
-            import json
-            try:
-                # Strip markdown code blocks if any
-                if "```json" in result_str:
-                    result_str = result_str.split("```json")[1].split("```")[0]
-                elif "```" in result_str:
-                    result_str = result_str.split("```")[1].split("```")[0]
-                
-                result = json.loads(result_str.strip())
-                chosen = result.get("chosen", "instruction").lower()
-                scores = result.get("scores", {chosen: 0.9})
-                confidence = float(result.get("confidence", 0.9))
-                missing = []
-            except Exception:
-                chosen = "instruction"
-                scores = {"instruction": 0.8}
-                confidence = 0.8
-                missing = []
-            
-            await self.think_delta(session_id, f"\nInferred task type: {chosen} with {confidence*100:.0f}% confidence.", is_final=True, parent=event.id)
+            result = json.loads(m.group(0))
+            chosen = result.get("chosen", "instruction").lower()
+            scores = result.get("scores", {chosen: 1.0})
+            confidence = float(result.get("confidence", 0.9))
+            missing = []
+        except Exception as e:
+            await self.emit_error(
+                session_id,
+                f"Task inference failed: {str(e)}. "
+                "The agent was unable to classify the dataset task type."
+            )
+            return
+        
+        await self.think_delta(session_id, f"\nInferred task type: {chosen} with {confidence*100:.0f}% confidence.", is_final=True, parent=event.id)
+
 
         # Persist + audit.
         task_inference = {

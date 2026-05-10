@@ -244,8 +244,14 @@ class BaseAgent:
         """
         from app.api.schemas.session import FSMState
 
-        # Transition to AWAITING_APPROVAL so the FE renders interaction buttons.
+        # 1. Track this phase as pending so we don't restore state prematurely.
         session = self.get_session(session_id)
+        if session:
+            pending = set(session.artifacts.get("pending_approvals", []))
+            pending.add(phase)
+            session_service.attach_artifact(session, "pending_approvals", list(pending))
+
+        # Transition to AWAITING_APPROVAL so the FE renders interaction buttons.
         prev_state = session.state if session else None
         if session and session.state != FSMState.AWAITING_APPROVAL:
             session_service.advance_state(
@@ -271,14 +277,29 @@ class BaseAgent:
 
         try:
             result = await future
+            # Mirror the user's feedback into the chat for visibility.
+            if result:
+                await self.emit_message(
+                    session_id, 
+                    f"**User Feedback ({phase}):** {result}",
+                    parent=None # Root level message
+                )
         finally:
             self.bus.off("PhaseApproved", _on_approved)
             self.bus.off("PhaseCommented", _on_commented)
 
-        # Restore the previous state (or default to PROFILING) so the
-        # pipeline can continue after the user responds.
-        session = self.get_session(session_id)
-        if session and session.state == FSMState.AWAITING_APPROVAL:
+            # 2. Remove this phase from pending.
+            session = self.get_session(session_id)
+            if session:
+                pending = set(session.artifacts.get("pending_approvals", []))
+                if phase in pending:
+                    pending.remove(phase)
+                session_service.attach_artifact(session, "pending_approvals", list(pending))
+            else:
+                pending = set()
+
+        # 3. Restore the previous state ONLY if no other agent is waiting.
+        if session and session.state == FSMState.AWAITING_APPROVAL and not pending:
             restore_to = prev_state if prev_state and prev_state != FSMState.AWAITING_APPROVAL else FSMState.PROFILING
             session_service.advance_state(
                 session, restore_to,
@@ -286,6 +307,7 @@ class BaseAgent:
             )
 
         return result
+
 
     # ── Streaming helpers (blackboard-mirrored) ────────────────────────────
 
@@ -334,13 +356,12 @@ class BaseAgent:
         *,
         system: str = "",
         stream_thoughts: bool = True,
+        include_tools: bool = False,
         parent: Optional[str] = None,
     ) -> str:
         """Execute a reasoning step using the configured LLM provider.
-
-        Provider config is sourced from process settings; we use ``getattr``
-        with defaults on the session record so this remains safe even when
-        per-session overrides are not part of the AgentSession schema.
+        
+        Set include_tools=True only if the agent needs to call search/analysis tools.
         """
         session = self.get_session(session_id)
         if not session:
@@ -356,6 +377,10 @@ class BaseAgent:
 
         full_text = ""
         messages = [{"role": "user", "content": prompt}]
+        
+        # If not using tools, explicitly tell the model to avoid tool-call syntax.
+        if not include_tools:
+            system = (system + "\n\n" if system else "") + "CRITICAL: Do NOT attempt to use any tools or functions. Return only plain text or JSON as requested."
 
         try:
             for chunk in stream_chat(
@@ -364,6 +389,7 @@ class BaseAgent:
                 model=model,
                 base_url=base_url,
                 messages=messages,
+                use_tools=include_tools,
                 extra_system=system,
             ):
                 full_text += chunk
