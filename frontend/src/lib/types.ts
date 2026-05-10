@@ -64,6 +64,9 @@ export type DatasetUploadResponse = {
   llm_probe: LLMProbe;
 };
 
+export const ACCEPTED_DATASET_TYPES =
+  '.csv,.json,.jsonl,.txt,.md,.pdf,.docx,.html';
+
 export type LLMProbe = {
   ok: boolean;
   mode: 'full_agent' | 'deterministic' | string;
@@ -186,6 +189,7 @@ export type RecoveryRecord = {
 
 export type AgentSession = {
   id: string;
+  name?: string;
   dataset_id: string;
   pipeline_id: string | null;
   job_id: string | null;
@@ -198,6 +202,9 @@ export type AgentSession = {
   clarifications: ClarificationAnswer[];
   recovery_history: RecoveryRecord[];
   artifacts: Record<string, unknown>;
+  llm_provider?: string | null;
+  llm_model?: string | null;
+  llm_base_url?: string | null;
   error_message: string | null;
   created_at: string;
   updated_at: string;
@@ -205,6 +212,7 @@ export type AgentSession = {
 
 export type SessionListItem = {
   id: string;
+  name?: string;
   dataset_id: string;
   state: FSMState;
   pipeline_id: string | null;
@@ -234,7 +242,9 @@ export type EventKind =
   | 'SaveLocalRequested' | 'PushToHFRequested' | 'ExportCompleted'
   | 'PhaseStarted' | 'PhaseCompleted'
   | 'PhasePlanProposed' | 'PhaseApproved' | 'PhaseCommented'
-  | 'NodeMaterialized'
+  | 'NodeMaterialized' | 'EdgeMaterialized'
+  | 'DataHealthReport'
+  | 'DatasetRestructured'
   | 'AgentThinking' | 'AgentPlanning' | 'AgentAsking' | 'AgentGarnishing' | 'AgentExecuting'
   | 'BlackboardUpdated'
   | 'AuditCritique' | 'AuditOverride'

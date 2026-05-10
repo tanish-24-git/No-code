@@ -115,7 +115,27 @@ function CanvasInner({ pipeline, events, onGraphChange, onSelectNode }: Props) {
         style: { stroke: '#fff', strokeWidth: 1.2, opacity: 0.25 },
       }));
     }
-    // Auto-chain nodes in declaration order.
+    // Prefer agent-emitted EdgeMaterialized events; fall back to
+    // auto-chaining nodes in declaration order.
+    const explicit: Edge[] = [];
+    if (events?.length) {
+      const seen = new Set<string>();
+      for (const e of events) {
+        if (e.kind !== 'EdgeMaterialized') continue;
+        const ed = (e.payload as { edge?: { id?: string; source?: string; target?: string; animated?: boolean } }).edge;
+        if (!ed?.id || !ed.source || !ed.target) continue;
+        if (seen.has(ed.id)) continue;
+        seen.add(ed.id);
+        explicit.push({
+          id: ed.id,
+          source: ed.source,
+          target: ed.target,
+          animated: !!ed.animated,
+          style: { stroke: '#fff', strokeWidth: 1.2, opacity: 0.25 },
+        });
+      }
+    }
+    if (explicit.length > 0) return explicit;
     const out: Edge[] = [];
     for (let i = 0; i < computedNodes.length - 1; i++) {
       const a = computedNodes[i];
@@ -129,7 +149,7 @@ function CanvasInner({ pipeline, events, onGraphChange, onSelectNode }: Props) {
       });
     }
     return out;
-  }, [fromPipeline, pipeline?.node_graph?.edges, computedNodes]);
+  }, [fromPipeline, pipeline?.node_graph?.edges, computedNodes, events]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(computedNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(computedEdges);
@@ -137,11 +157,15 @@ function CanvasInner({ pipeline, events, onGraphChange, onSelectNode }: Props) {
   const nodeTypes = useMemo(() => ({
     dataset: PipelineNode,
     preprocess: PipelineNode,
+    restructure: PipelineNode,
     balance: PipelineNode,
     split: PipelineNode,
     augment: PipelineNode,
     template_prompts: PipelineNode,
     convert_format: PipelineNode,
+    model: PipelineNode,
+    strategy: PipelineNode,
+    config: PipelineNode,
     train: PipelineNode,
     evaluate: PipelineNode,
     sandbox: PipelineNode,

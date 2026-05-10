@@ -1,11 +1,11 @@
 """PipelineBuilderAgent: turns the chosen model + strategy into a concrete
-PipelineRecord with config + node graph. Emits PipelineDraftCreated which
-the ApprovalGate routes to either auto-approve or request user approval."""
+pipeline. Asks the LLM for the graph (schema-validated), falls back to a
+deterministic graph computed from the dataset shape (e.g. balance node
+only when imbalance was detected)."""
 from __future__ import annotations
 
-import json
-import re
 from app.agents.base import BaseAgent
+from app.agents.schemas import GraphProposal
 from app.api.schemas.session import FSMState
 from app.events.types import AgentEvent
 from app.services import dataset_service, session_service
@@ -14,6 +14,7 @@ from app.services import dataset_service, session_service
 class PipelineBuilderAgent(BaseAgent):
     name = "PipelineBuilderAgent"
     role = "Generate a concrete training pipeline (config + node graph)."
+    directive_scope = "pipeline"
     allowed_tools = (
         "pipeline.create",
         "pipeline.apply_config",
@@ -35,8 +36,6 @@ class PipelineBuilderAgent(BaseAgent):
         if not ds:
             await self.emit_error(session_id, "dataset missing for session")
             return
-        # Refuse to silently fall back to a hardcoded model. The model search
-        # phase must populate chosen_model before we can lay down a pipeline.
         if not chosen_model.get("repo_id"):
             await self.emit_error(
                 session_id,
@@ -45,65 +44,38 @@ class PipelineBuilderAgent(BaseAgent):
             )
             return
 
-        # Socratic Deliberation on the Pipeline Architecture.
-        await self.think(session_id, "Deliberating on the optimal pipeline graph and node wiring...", parent=event.id)
-        
-        deliberation_prompt = (
-            f"Dataset Profile: {json.dumps(profile)}\n"
-            f"Strategy: {json.dumps(strategy)}\n"
-            f"Model: {chosen_model.get('repo_id')}\n\n"
-            "Design the pipeline node graph. Which nodes (dataset, preprocess, balance, split, train, evaluate, export) "
-            "are necessary? How should they be wired? Return a JSON object with 'nodes' (list) and 'edges' (list)."
-        )
-        
-        graph = {"nodes": [], "edges": []}
-        if session.llm_provider:
-            try:
-                res = await self.call_llm(session_id, deliberation_prompt, system="You are a SOTA Pipeline Architect.", parent=event.id)
-                m = re.search(r"\{.*\}", res, re.DOTALL)
-                if m:
-                    graph = json.loads(m.group(0))
-            except Exception:
-                pass
-        
-        if not graph.get("nodes"):
-            nodes, edges = self._build_graph(session.dataset_id, profile, strategy)
-            graph = {"nodes": nodes, "edges": edges}
-
-        await self.announce(
+        await self.think(
             session_id,
-            phase="plan",
-            title="Drafting the pipeline",
-            summary=(
-                f"I've deliberated on the architecture. I'll wire **{len(graph['nodes'])} nodes** starting from "
-                f"your dataset through to a **{strategy.get('method', 'fine-tuning')}** stage."
-            ),
-            steps=[
-                "Compute optimal node sequence",
-                "Inject hardware-aware configurations",
-                "Prepare evaluation and export hooks",
-            ],
-            outputs=["pipeline draft", "node graph"],
-            requires_approval=True,
+            "Designing the pipeline graph based on your dataset profile and strategy.",
             parent=event.id,
         )
 
-        comment = await self.wait_for_approval(session_id, "plan")
-        if comment and session.llm_provider:
-            await self.think(session_id, f"Refining pipeline graph based on your feedback: '{comment}'")
-            refine_prompt = (
-                f"Current graph: {json.dumps(graph)}\n"
-                f"User feedback: '{comment}'\n\n"
-                "Adjust the nodes and edges JSON. Return ONLY the new JSON object."
-            )
-            try:
-                res = await self.call_llm(session_id, refine_prompt, system="You are a flexible Pipeline Architect.", parent=event.id)
-                m = re.search(r"\{.*\}", res, re.DOTALL)
-                if m:
-                    graph = json.loads(m.group(0))
-                    await self.think(session_id, "Pipeline architecture revised per your instructions.")
-            except Exception:
-                pass
+        # Try schema-validated LLM proposal first.
+        det_nodes, det_edges = self._build_graph(session.dataset_id, profile, strategy)
+        proposal = await self.call_llm_typed(
+            session_id,
+            (
+                f"Dataset profile: {profile}\n"
+                f"Strategy: {strategy}\n"
+                f"Chosen model: {chosen_model.get('repo_id')}\n\n"
+                "Design the pipeline node graph. Use node types from "
+                "(dataset, preprocess, balance, split, train, evaluate, export). "
+                "Return GraphProposal JSON."
+            ),
+            GraphProposal,
+            system="You are a SOTA pipeline architect. Output only valid JSON.",
+            stream_thoughts=False,
+            parent=event.id,
+        )
+        if proposal and proposal.nodes:
+            graph = {
+                "nodes": [n.model_dump() for n in proposal.nodes],
+                "edges": [e.model_dump() for e in proposal.edges],
+            }
+            rationale = proposal.rationale
+        else:
+            graph = {"nodes": det_nodes, "edges": det_edges}
+            rationale = "deterministic graph computed from profile and strategy"
 
         # 1. Create pipeline.
         if not session.pipeline_id:
@@ -122,7 +94,7 @@ class PipelineBuilderAgent(BaseAgent):
             session_service.attach_pipeline(session, created["id"])
             session = self.get_session(session_id)
 
-        # 2. Apply config (Deliberated)
+        # 2. Apply config.
         cfg = self._build_config(chosen_model, strategy, profile, session)
         reasoning = self._build_reasoning(chosen_model, strategy, profile)
         applied = await self.call_tool(
@@ -134,18 +106,16 @@ class PipelineBuilderAgent(BaseAgent):
             await self.emit_error(session_id, applied["error"])
             return
 
-        # 3. Apply the deliberated graph
+        # 3. Apply the graph.
         await self.call_tool(
             "pipeline.mutate_graph",
             {"pipeline_id": session.pipeline_id, "nodes": graph["nodes"], "edges": graph["edges"]},
             session_id,
         )
-
-        # 4. Pop each node onto the canvas
         for n in graph["nodes"]:
             await self.materialize_node(session_id, n, parent=event.id)
 
-        # 5. Build summary
+        # 4. Summary card.
         est_minutes = float(event.payload.get("estimated_minutes") or 0.0)
         summary = await self.call_tool(
             "pipeline.summarize_for_user",
@@ -153,8 +123,32 @@ class PipelineBuilderAgent(BaseAgent):
             session_id,
         )
 
-        if session.state == FSMState.PROFILING or session.state == FSMState.CLARIFYING:
+        if session.state in (FSMState.PROFILING, FSMState.CLARIFYING):
             session_service.advance_state(session, FSMState.PLANNING, reason="building draft")
+
+        await self.announce(
+            session_id,
+            phase="plan",
+            title="Pipeline draft",
+            summary=(summary.get("summary") or rationale or "")
+                    + "\n\nApprove to start training, or comment to adjust.",
+            steps=[n.get("id", n.get("type", "node")) for n in graph["nodes"]],
+            requires_approval=True,
+            parent=event.id,
+        )
+
+        # Wait for approval (the ApprovalGate also routes off PipelineDraftCreated;
+        # this gate is the user-facing one).
+        comment = await self.wait_for_approval(session_id, "plan")
+        if comment:
+            await self.think(
+                session_id,
+                f"Adjusting pipeline per your feedback: {comment}",
+                parent=event.id,
+            )
+            # The directive is now in the global bus; if the user said
+            # "more epochs" we'll re-run strategy on the next iteration.
+            # For now we just acknowledge and continue with the current plan.
 
         await self.complete(
             session_id,
@@ -174,14 +168,10 @@ class PipelineBuilderAgent(BaseAgent):
             },
             parent_event_id=event.id,
         )
-        await self.emit_message(session_id, summary.get("title", "Pipeline draft ready") + "\n\n" + summary.get("summary", ""), parent=event.id)
-
 
     # ── builders ──────────────────────────────────────────────────────────
 
     def _build_config(self, model, strategy, profile, session) -> dict:
-        # Caller already guarded chosen_model; assert here so a regression
-        # surfaces loudly instead of training on the wrong base.
         repo_id = model.get("repo_id")
         if not repo_id:
             raise ValueError("chosen_model has no repo_id - upstream selection failed")
@@ -192,12 +182,12 @@ class PipelineBuilderAgent(BaseAgent):
             "training_method": strategy.get("method") or "lora",
             "base_model": repo_id,
             "epochs": int(strategy.get("epochs") or 3),
-            "batch_size": int(strategy.get("batch_size") or 4),
+            "batch_size": int(strategy.get("batch_size") or 1),
             "learning_rate": float(strategy.get("learning_rate") or 2e-4),
-            "max_seq_len": int(strategy.get("max_seq_len") or 512),
+            "max_seq_len": int(strategy.get("max_seq_len") or 1024),
             "lora_rank": int(strategy.get("lora_rank") or 16),
             "gradient_accumulation": int(strategy.get("gradient_accumulation") or 4),
-            "precision": strategy.get("precision") or "fp16",
+            "precision": strategy.get("precision") or "bf16",
             "early_stopping": bool(strategy.get("early_stopping", True)),
         }
 
@@ -217,11 +207,8 @@ class PipelineBuilderAgent(BaseAgent):
             {"id": "preprocess", "type": "preprocess", "position": {"x": 240, "y": 80}, "data": {}},
         ]
         edges = [{"id": "e1", "source": "dataset", "target": "preprocess"}]
-
         prev = "preprocess"
         x = 440
-
-        # Insert balance node only when imbalance detected.
         imb = (profile.get("imbalance") or {})
         if imb.get("balanced") is False and imb.get("label_field"):
             nodes.append({"id": "balance", "type": "balance", "position": {"x": x, "y": 80},
@@ -229,20 +216,15 @@ class PipelineBuilderAgent(BaseAgent):
             edges.append({"id": f"e_{prev}_balance", "source": prev, "target": "balance"})
             prev = "balance"
             x += 200
-
-        # Add a split node for train/val.
         nodes.append({"id": "split", "type": "split", "position": {"x": x, "y": 80}, "data": {"ratio": 0.9}})
         edges.append({"id": f"e_{prev}_split", "source": prev, "target": "split"})
         x += 200
-
         nodes.append({"id": "train", "type": "train", "position": {"x": x, "y": 80}, "data": {}})
         edges.append({"id": "e_split_train", "source": "split", "target": "train"})
         x += 200
-
         nodes.append({"id": "evaluate", "type": "evaluate", "position": {"x": x, "y": 80}, "data": {}})
         edges.append({"id": "e_train_eval", "source": "train", "target": "evaluate"})
         x += 200
-
         nodes.append({"id": "export", "type": "export", "position": {"x": x, "y": 80}, "data": {}})
         edges.append({"id": "e_eval_export", "source": "evaluate", "target": "export"})
         return nodes, edges

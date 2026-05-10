@@ -18,7 +18,7 @@ import { api, fetcher } from '@/lib/api';
 import { useSessionEvents } from '@/lib/sse';
 import { cn } from '@/lib/cn';
 import type { AgentEvent, AgentSession, EventKind } from '@/lib/types';
-import { Brain, ClipboardList, Loader2, Send } from 'lucide-react';
+import { Loader2, Send } from 'lucide-react';
 
 
 // ── Folding rules ─────────────────────────────────────────────────────────
@@ -42,14 +42,6 @@ const CHAT_KINDS: ReadonlySet<EventKind> = new Set([
   'RecoveryPlanGenerated',
   'SessionClosed',
   'Error',
-  'AgentThinking',
-  'AgentPlanning',
-  'PhaseStarted',
-  'IntakeStarted',
-  'DatasetProfileStarted',
-  'TaskInferenceStarted',
-  'StrategyChosen',
-  'HardwareProfileStarted',
 ]);
 
 const STAGE_LABEL: Record<string, string> = {
@@ -330,17 +322,6 @@ function ChatRow(props: RowProps) {
       return <Bubble side="left" text="Session closed." />;
     case 'Error':
       return <Bubble side="left" text={`Error: ${event.payload.error ?? ''}`} />;
-    case 'AgentThinking':
-      return <ThinkingRow event={event} />;
-    case 'AgentPlanning':
-      return <PlanningRow event={event} />;
-    case 'PhaseStarted':
-    case 'IntakeStarted':
-    case 'DatasetProfileStarted':
-    case 'TaskInferenceStarted':
-    case 'StrategyChosen':
-    case 'HardwareProfileStarted':
-      return <StatusRow event={event} />;
     default:
       return null;
   }
@@ -350,17 +331,6 @@ function ChatRow(props: RowProps) {
 // ── Bubble ────────────────────────────────────────────────────────────────
 
 function Bubble({ side, text, children }: { side: 'left' | 'right'; text?: string; children?: React.ReactNode }) {
-  const cleanText = useMemo(() => {
-    if (!text) return text;
-    // Remove bold markers and format bullets
-    return text
-      .replace(/\*\*/g, '')
-      .replace(/^\* /gm, '• ')
-      .replace(/ \* /g, ' • ')
-      .replace(/\*/g, '')
-      .trim();
-  }, [text]);
-
   return (
     <div className={cn('flex', side === 'right' && 'justify-end')}>
       <div
@@ -371,62 +341,8 @@ function Bubble({ side, text, children }: { side: 'left' | 'right'; text?: strin
             : 'bg-bg-2 text-fg rounded-bl-sm border border-border shadow-sm',
         )}
       >
-        {cleanText}
+        {text}
         {children}
-      </div>
-    </div>
-  );
-}
-
-
-// ── Internal phase rows ───────────────────────────────────────────────────
-
-function ThinkingRow({ event }: { event: AgentEvent }) {
-  const text = String(event.payload.text || '');
-  if (!text) return null;
-  return (
-    <div className="flex justify-start">
-      <div className="max-w-[85%] px-3 py-2 rounded-xl bg-bg-2/40 text-fg-2 text-[11px] border border-border/50 shadow-sm animate-in fade-in duration-500">
-        <div className="flex items-center gap-1.5 mb-1 text-fg-3 opacity-70">
-          <Brain className="w-3.5 h-3.5" />
-          <span className="uppercase tracking-widest font-bold text-[9px]">Internal Monologue</span>
-        </div>
-        <div className="leading-normal italic opacity-90 whitespace-pre-wrap">{text}</div>
-      </div>
-    </div>
-  );
-}
-
-function PlanningRow({ event }: { event: AgentEvent }) {
-  const steps = (event.payload.steps as string[]) || [];
-  const title = (event.payload.title as string) || 'Strategy Roadmap';
-  return (
-    <div className="flex justify-start">
-      <div className="max-w-[85%] space-y-2.5 px-3.5 py-3 rounded-xl bg-bg-2/20 border border-dashed border-border shadow-sm animate-in fade-in slide-in-from-left-1 duration-500">
-        <div className="flex items-center gap-1.5 text-fg-3 opacity-70">
-          <ClipboardList className="w-3.5 h-3.5" />
-          <span className="uppercase tracking-widest font-bold text-[9px]">{title}</span>
-        </div>
-        <ul className="space-y-1.5">
-          {steps.map((s, i) => (
-            <li key={i} className="text-[12px] text-fg flex gap-2.5 leading-snug">
-              <span className="text-fg-3 font-mono text-[10px] mt-0.5">{String(i + 1).padStart(2, '0')}</span>
-              <span>{s}</span>
-            </li>
-          ))}
-        </ul>
-      </div>
-    </div>
-  );
-}
-
-function StatusRow({ event }: { event: AgentEvent }) {
-  const text = (event.payload.title as string) || (event.payload.phase as string) || event.kind;
-  return (
-    <div className="flex justify-center py-1">
-      <div className="px-3 py-1 rounded-full bg-bg-2/50 border border-border/30 text-[10px] text-fg-3 font-medium uppercase tracking-wider flex items-center gap-2">
-        <div className="w-1 h-1 rounded-full bg-fg-3/40 animate-pulse" />
-        {text.replace(/([A-Z])/g, ' $1').trim()}
       </div>
     </div>
   );

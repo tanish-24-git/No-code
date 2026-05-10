@@ -17,6 +17,7 @@ import type {
   Pipeline,
   SessionListItem,
 } from '@/lib/types';
+import { ACCEPTED_DATASET_TYPES } from '@/lib/types';
 import { AgentActivity } from '@/components/AgentActivity';
 import { PipelineCanvas } from '@/components/PipelineCanvas';
 import { useSessionEvents } from '@/lib/sse';
@@ -116,7 +117,7 @@ export default function PlaygroundPage() {
           >
             <input
               type="file"
-              accept=".csv,.json,.jsonl"
+              accept={ACCEPTED_DATASET_TYPES}
               className="hidden"
               disabled={uploading}
               onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
@@ -128,10 +129,10 @@ export default function PlaygroundPage() {
                 <Upload className="w-5 h-5 text-white/60 mx-auto" />
               )}
               <p className="text-[10px] uppercase tracking-[0.25em] font-black text-white/60">
-                {uploading ? 'Processing…' : 'Drop dataset to start'}
+                {uploading ? 'Processing...' : 'Drop dataset to start'}
               </p>
               <p className="text-[9px] uppercase tracking-widest text-white/30 font-medium">
-                .csv .json .jsonl
+                csv json jsonl txt md pdf docx html
               </p>
             </div>
           </label>
