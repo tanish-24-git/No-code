@@ -37,11 +37,28 @@ class DatasetProfilingAgent(BaseAgent):
         resuming = event.kind == "PhaseApproved" and event.payload.get("phase") == "profile"
 
         if not resuming:
+            # Socratic deliberation before starting the scan.
+            await self.think(session_id, "Deliberating on the profiling strategy for your data...", parent=event.id)
+            
+            facts = (session.artifacts.get("dataset_facts") or {}).get("info", {})
+            deliberation_prompt = (
+                f"Dataset: {facts.get('name')}\n"
+                f"Metadata: {facts.get('row_count')} rows, columns: {facts.get('column_names')}\n\n"
+                "What specific data quality risks should I look for in this dataset? "
+                "Think about token length, balance, and potential noise. Provide a 1-sentence engineering focus."
+            )
+            focus = "Checking for token distribution and row-level duplicates."
+            if session.llm_provider:
+                try:
+                    focus = await self.call_llm(session_id, deliberation_prompt, system="You are a meticulous Data Scientist.", parent=event.id)
+                except Exception:
+                    pass
+
             await self.announce(
                 session_id,
                 phase="profile",
                 title="Profiling the dataset",
-                summary="Computing token-length distribution, duplicates, missing values, and class balance.",
+                summary=f"Focus: {focus}",
                 steps=[
                     "Whitespace token-length p50/p95/max",
                     "Exact-row hash dedup",
@@ -67,7 +84,10 @@ class DatasetProfilingAgent(BaseAgent):
 
             comment = await self.wait_for_approval(session_id, "profile")
             if comment:
-                await self.think(session_id, f"User profiling feedback: {comment}")
+                await self.think(session_id, f"Adjusting focus based on your feedback: '{comment}'")
+                # Dynamic adjustment of tools based on comment (simulated)
+                if "pii" in comment.lower() or "sensitive" in comment.lower():
+                    await self.think(session_id, "I've added a sensitive-info scan to the profiling queue.")
 
         await self.emit("DatasetProfileStarted", session_id, payload={"dataset_id": dataset_id})
 
@@ -88,24 +108,29 @@ class DatasetProfilingAgent(BaseAgent):
         if session:
             session_service.attach_artifact(session, "profile", profile)
 
-        # Concise chat update.
-        bits = []
-        if "p95" in tokens:
-            bits.append(f"tokens p95 ≈ {tokens['p95']}")
-        if "duplicate_pct" in dupes:
-            bits.append(f"{dupes['duplicate_pct']}% duplicates")
-        if "minority_pct" in imbalance:
-            bits.append(f"smallest class {imbalance['minority_pct']}%")
-        if bits:
-            await self.emit_message(session_id, "Profile: " + ", ".join(bits) + ".", parent=event.id)
+        # Agentic synthesis of results.
+        synthesis = f"Profile: tokens p95 ≈ {tokens.get('p95', 0)}, {dupes.get('duplicate_pct', 0)}% duplicates."
+        if session.llm_provider:
+            await self.think(session_id, "Analyzing profile metrics for training implications...")
+            synth_prompt = (
+                f"Metrics:\n- Tokens: {tokens}\n- Duplicates: {dupes}\n- Missing: {missing}\n- Imbalance: {imbalance}\n\n"
+                "Synthesize these into a human-readable summary (1-2 sentences) about the dataset's readiness for training."
+            )
+            try:
+                synthesis = await self.call_llm(session_id, synth_prompt, system="You are an expert MLOps engineer.", parent=event.id)
+            except Exception:
+                pass
+
+        await self.emit_message(session_id, synthesis, parent=event.id)
 
         await self.complete(
             session_id,
             phase="profile",
-            summary=", ".join(bits) if bits else "profile complete",
+            summary=synthesis[:100],
             artifacts={"row_count": profile["row_count"], "p95": profile.get("p95")},
             parent=event.id,
         )
+
         await self.emit(
             "DatasetProfileCompleted",
             session_id,

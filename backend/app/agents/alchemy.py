@@ -24,11 +24,6 @@ from app.events.types import AgentEvent
 from app.services import session_service
 
 
-_DUP_HARD = 30.0       # blueprint example: 30% dupes triggers explicit ask
-_DUP_SOFT = 10.0
-_MISSING_HARD = 50.0
-
-
 class DataAlchemistAgent(BaseAgent):
     name = "DataAlchemistAgent"
     role = "Detects data-quality risks and surfaces the Data Health Report."
@@ -56,14 +51,52 @@ class DataAlchemistAgent(BaseAgent):
             parent=event.id,
         )
 
-        report = self._build_report(profile)
+        # Deliberate on data health using the LLM.
+        prompt = (
+            f"Dataset Profile:\n"
+            f"- Row count: {profile.get('row_count')}\n"
+            f"- Duplicates: {profile.get('duplicates', {}).get('duplicate_pct') or 0}%\n"
+            f"- Missing values: {profile.get('missing', {}).get('per_column')}\n"
+            f"- Class balance: {profile.get('imbalance', {}).get('minority_pct') or 100}%\n\n"
+            "Assess the data health for fine-tuning. Is it 'healthy', 'advisory', 'needs_attention', or 'blocking'? "
+            "Explain why in a short summary. If there are severe issues, propose a specific question (ask) for the user. "
+            "Return a JSON object with 'verdict', 'score' (0.0 to 1.0), 'summary', and 'asks' (list of strings)."
+        )
+        
+        # Default report as safety fallback
+        report = {
+            "verdict": "healthy",
+            "score": 1.0,
+            "summary": "clean dataset; no remediation suggested",
+            "asks": [],
+            "confidence": 0.9
+        }
+        
+        if session.llm_provider:
+            try:
+                import json, re
+                res_text = await self.call_llm(
+                    session.id,
+                    prompt,
+                    system="You are a Socratic data scientist. Grade data quality strictly for fine-tuning readiness.",
+                    parent=event.id
+                )
+
+                m = re.search(r"\{.*\}", res_text, re.DOTALL)
+                if m:
+                    res_json = json.loads(m.group(0))
+                    report.update(res_json)
+                    report["confidence"] = round(0.6 + 0.4 * report["score"], 3)
+            except Exception:
+                pass
+
         session_service.attach_artifact(session, "data_health", report)
         await self.emit(
             "DataHealthReport",
             session.id,
             payload={"dataset_id": dataset_id, "report": report},
             parent_event_id=event.id,
-            confidence=report["confidence"],
+            confidence=report.get("confidence", 0.9),
         )
 
         # Streamed verdict line — the UI renders a coloured banner.
@@ -74,9 +107,8 @@ class DataAlchemistAgent(BaseAgent):
             parent=event.id,
         )
 
-        # Hard issues surface as a Socratic ask. The blueprint's example is
-        # the "30% duplicates / inconsistent schemas" question.
-        if report["asks"]:
+        # Hard issues surface as a Socratic ask.
+        if report.get("asks"):
             await self.ask(
                 session.id,
                 report["asks"][0],
@@ -85,68 +117,3 @@ class DataAlchemistAgent(BaseAgent):
             )
 
     # ── helpers ──────────────────────────────────────────────────────────
-
-    def _build_report(self, profile: dict[str, Any]) -> dict[str, Any]:
-        dup_pct = float((profile.get("duplicates") or {}).get("duplicate_pct") or 0.0)
-        missing = profile.get("missing") or {}
-        worst_missing = 0.0
-        worst_col = None
-        for col, m in (missing.get("per_column") or {}).items():
-            pct = float(m.get("missing_pct") or 0.0)
-            if pct > worst_missing:
-                worst_missing, worst_col = pct, col
-
-        imbalance = profile.get("imbalance") or {}
-        minority = float(imbalance.get("minority_pct") or 100.0)
-
-        score = 1.0
-        notes: list[str] = []
-        asks: list[str] = []
-
-        if dup_pct >= _DUP_HARD:
-            score -= 0.4
-            notes.append(f"{dup_pct:.0f}% duplicate rows")
-            asks.append(
-                f"I found {dup_pct:.0f}% duplicates. Should I deduplicate, or "
-                "treat them as separate domains?"
-            )
-        elif dup_pct >= _DUP_SOFT:
-            score -= 0.15
-            notes.append(f"{dup_pct:.0f}% duplicates (advisory)")
-
-        if worst_missing >= _MISSING_HARD and worst_col:
-            score -= 0.3
-            notes.append(f"`{worst_col}` is {worst_missing:.0f}% missing")
-            asks.append(
-                f"`{worst_col}` is missing in {worst_missing:.0f}% of rows. Drop it, "
-                "impute, or skip rows that lack it?"
-            )
-
-        if 0 < minority < 5:
-            score -= 0.2
-            notes.append(f"smallest class is only {minority:.1f}% — risk of imbalance")
-
-        score = max(0.0, min(1.0, score))
-        if score >= 0.85:
-            verdict = "healthy"
-        elif score >= 0.7:
-            verdict = "advisory"
-        elif score >= 0.5:
-            verdict = "needs_attention"
-        else:
-            verdict = "blocking"
-
-        summary = ", ".join(notes) if notes else "clean dataset; no remediation suggested"
-        return {
-            "verdict": verdict,
-            "score": round(score, 3),
-            "confidence": round(0.6 + 0.4 * score, 3),
-            "summary": summary,
-            "asks": asks,
-            "signals": {
-                "duplicate_pct": dup_pct,
-                "worst_missing_pct": worst_missing,
-                "worst_missing_column": worst_col,
-                "minority_class_pct": minority,
-            },
-        }

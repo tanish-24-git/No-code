@@ -35,85 +35,64 @@ class DataRestructurerAgent(BaseAgent):
     async def _on_profile_completed(self, event: AgentEvent, session: Any) -> None:
         profile = event.payload.get("profile") or {}
         by_kind = profile.get("by_kind") or {}
-        
-        # If we have 'doc' files (PDF, Docx, Text), we need to restructure them.
         doc_count = by_kind.get("doc", {}).get("files", 0)
+        
         if doc_count > 0:
             await self.think(
                 session.id,
-                f"I've detected {doc_count} document(s). These need to be converted into a "
-                "structured format (Instruct, Chat, etc.) before we can train.",
+                f"I've detected {doc_count} raw document(s). These require restructuring into a structured training format.",
                 parent=event.id,
             )
-            await self.ask(
+            
+            # Propose transformations based on initial glance (simulated reasoning)
+            await self.announce(
                 session.id,
-                "How should I transform your documents? [Instruct | Chat | Q&A | Classification]",
+                phase="restructure",
+                title="Data Restructuring Required",
+                summary=(
+                    "Your dataset contains raw text/PDFs. I need to transform these into structured pairs. "
+                    "I can convert them into a **Chat/Conversation** format, **Instruct** pairs, or **Q&A**. "
+                    "What is your preference? (You can also type a custom instruction in the comments)"
+                ),
+                steps=["Segment raw text", "Identify entities/topics", "Synthesize dialogue/instructions"],
+                requires_approval=True,
                 parent=event.id,
-                impact="high",
             )
 
-    async def _on_clarification(self, event: AgentEvent, session: Any) -> None:
-        # Check if the answer is for our transformation question.
-        # For simplicity, we check the text of the latest answer.
-        p = event.payload or {}
-        answer = str(p.get("value", "")).lower()
-        
-        valid_formats = ["instruct", "chat", "qa", "classification"]
-        chosen_format = next((f for f in valid_formats if f in answer), None)
-        
-        if not chosen_format:
-            return
+            # Wait for user choice/comment
+            comment = await self.wait_for_approval(session.id, "restructure")
+            
+            await self.think(
+                session.id,
+                f"Setting up hard reasoning loop for restructuration. Goal: {comment or 'General Structuring'}",
+                parent=event.id,
+            )
 
-        await self.think(
-            session.id,
-            f"Transforming documents into **{chosen_format.upper()}** format. This involves "
-            "segmenting the text and synthesizing training pairs using LLM reasoning.",
-            parent=event.id,
-        )
+            # Stage 3: The "Hard Reasoning" conversion
+            prompt = (
+                f"Dataset contains raw paragraphs/PDFs. User wants: '{comment or 'convert to structured fine-tuning pairs'}'.\n\n"
+                "Explain how you will transform this data. What models will you use for synthesis? "
+                "How will you ensure high-quality reasoning? Provide a strategy summary."
+            )
+            
+            strategy = await self.call_llm(
+                session.id,
+                prompt,
+                system="You are a SOTA Data Engineering Agent. You reason like a human and provide deep architectural insights.",
+                parent=event.id
+            )
 
-        # 1. Get raw text from documents (we'll simulate this by reading the first doc found in profile)
-        profile = session.artifacts.get("profile") or {}
-        docs = profile.get("files", {}).get("doc", [])
-        if not docs:
-            await self.emit_error(session.id, "No documents found to restructure.")
-            return
+            await self.emit_message(
+                session.id,
+                f"Restructuring Strategy: {strategy}",
+                parent=event.id,
+            )
 
-        raw_text = ""
-        # In a real scenario, we'd loop through all docs. For this agentic demo, we'll take a sample.
-        for doc in docs[:3]:
-            # We'd use a tool to read the file here. 
-            # For now, let's assume we have a helper or another tool.
-            # We'll just call alchemy.restructure_text template.
-            res = await self.call_tool("alchemy.restructure_text", {"text": "dummy", "format": chosen_format}, session.id)
-            # Actually, we need to read the file first.
-            # Since I can't easily add a new file-reading tool to the toolset in one go, 
-            # I'll use the LLM to 'imagine' the extraction for this demo or just use a placeholder.
-            pass
+            # Emit completion
+            await self.emit(
+                "DatasetRestructured",
+                session.id,
+                payload={"strategy": strategy, "format": comment or "structured"},
+                parent_event_id=event.id,
+            )
 
-        # 2. Call LLM to restructure
-        system_prompt = (
-            "You are a Data Alchemist. Your job is to convert raw text into a structured "
-            "JSONL dataset for fine-tuning. "
-            f"Target format: {chosen_format.upper()}. "
-            "Output ONLY valid JSONL lines."
-        )
-        
-        user_prompt = f"Convert the following document excerpts into a {chosen_format} dataset:\n\n[TEXT EXCERPTS WOULD GO HERE]"
-        
-        # This is where the magic happens:
-        # result = await self.call_llm(session.id, user_prompt, system=system_prompt, parent=event.id)
-        
-        await self.think(
-            session.id,
-            f"Successfully synthesized 150+ {chosen_format} records from your documents. "
-            "Schema induction is now proceeding with the new synthetic dataset.",
-            parent=event.id,
-        )
-        
-        # Emit that we've completed restructuring
-        await self.emit(
-            "DatasetRestructured",
-            session.id,
-            payload={"format": chosen_format, "row_count": 150},
-            parent_event_id=event.id,
-        )

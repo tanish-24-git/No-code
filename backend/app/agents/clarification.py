@@ -28,21 +28,43 @@ class ClarificationAgent(BaseAgent):
         info = (session.artifacts.get("dataset_facts") or {}).get("info", {})
         cols = info.get("column_names", [])
 
-        # Pick one question at a time, in priority order.
-        if "user_goal" in missing:
-            qid, opts, ctx = "q_user_goal", None, "I couldn't tell from the data alone."
-        elif "target_field" in missing:
-            qid, opts, ctx = "q_target_field", cols, "I see these fields and need to know which is the target."
-        elif "input_field" in missing:
-            qid, opts, ctx = "q_input_fields", cols, "Which fields should the model see as input?"
-        else:
-            qid, opts, ctx = "q_task_type", None, "I'm not sure between a couple of task types."
+        # Deliberate on which question to ask next using the LLM.
+        from app.orchestration.catalog import CATALOG
+        catalog_desc = "\n".join([f"- {k}: {v.question} ({v.why})" for k, v in CATALOG.items()])
+        
+        prompt = (
+            f"Missing information: {', '.join(missing)}\n"
+            f"Dataset columns: {', '.join(cols)}\n"
+            f"Question Catalog:\n{catalog_desc}\n\n"
+            "Which question should I ask next to proceed with the pipeline? "
+            "Return ONLY the question_id."
+        )
+        
+        qid = "q_user_goal"
+        if session.llm_provider:
+            try:
+                qid_raw = await self.call_llm(
+                    session_id,
+                    prompt,
+                    system="You are a data analyst. Pick the best question_id from the catalog to clarify user intent. Return ONLY the ID.",
+                    parent=event.id
+                )
+                qid = qid_raw.strip().strip("'").strip('"').split("\n")[0]
+                if qid not in CATALOG:
+                    qid = "q_user_goal"
+            except Exception:
+                pass
+
+        # Context for the question
+        ctx = f"I need to clarify the {qid.replace('q_', '')} to configure the pipeline correctly."
+        opts = cols if qid in ("q_target_field", "q_input_fields") else None
 
         q_payload = await self.call_tool(
             "clarify.ask",
             {"question_id": qid, "options": opts, "context": ctx},
             session_id,
         )
+
         if "error" in q_payload:
             await self.emit_error(session_id, q_payload["error"])
             return

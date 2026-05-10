@@ -20,16 +20,7 @@ from app.events.types import AgentEvent
 from app.services import session_service
 
 
-_OPENING_PLAN = [
-    "Read dataset metadata and infer schema",
-    "Profile token lengths, duplicates, missing values",
-    "Probe local hardware (device + VRAM + throughput)",
-    "Search HuggingFace for a base model that fits",
-    "Pick a training strategy (LoRA / QLoRA / DoRA)",
-    "Draft the pipeline graph and ask you to approve",
-    "Train, monitor, recover, evaluate, sandbox",
-    "Save locally or push to HF on your command",
-]
+
 
 _PLAN_SYSTEM_PROMPT = (
     "You are the lead orchestrator for FineTune Studio. Generate a concrete "
@@ -88,44 +79,122 @@ class OrchestratorAgent(BaseAgent):
         )
 
 
-        # In full-agent mode, ask the LLM for a custom plan; fall back to the
-        # static plan if anything goes wrong.
-        steps = _OPENING_PLAN
-        if mode == "full_agent":
-            session = self.get_session(session_id)
-            ds_id = session.dataset_id if session else "this dataset"
-            try:
-                plan_text = await self.call_llm(
-                    session_id,
-                    f"Plan the fine-tuning session for dataset {ds_id}. Provide 6-8 clear steps.",
-                    system=_PLAN_SYSTEM_PROMPT,
-                    stream_thoughts=False,
-                    parent=event.id,
-                )
-                m = re.search(r"\[.*\]", plan_text, re.DOTALL)
-                if m:
-                    parsed = json.loads(m.group(0))
-                    if isinstance(parsed, list) and parsed:
-                        steps = [str(s) for s in parsed][:10]
-            except Exception:
-                steps = _OPENING_PLAN
+        # In full-agent mode, ask the LLM for a custom plan.
+        if mode != "full_agent":
+             await self.emit_error(
+                 session_id,
+                 f"Agent activation failed: {probe.get('detail', 'no LLM provider configured')}. "
+                 "Configure a valid OpenAI/Anthropic/Groq key in Settings to use the agentic pipeline."
+             )
+             return
+
+        session = self.get_session(session_id)
+        ds_id = session.dataset_id if session else "this dataset"
+        
+        await self.think(session_id, "Deliberating on a custom execution plan for your data...", parent=event.id)
+        
+        try:
+            # We use a multi-stage prompt to ensure we get both reasoning and JSON.
+            plan_prompt = (
+                f"I am initializing a fine-tuning session for dataset {ds_id}.\n\n"
+                "Task: Generate a concrete 6-8 step execution plan.\n"
+                "Requirements:\n"
+                "1. Cover intake, profiling, hardware probe, task inference, model search, strategy, and training.\n"
+                "2. If raw docs are present, include a restructuring phase.\n"
+                "3. Think like a SOTA AI engineer. Be precise.\n\n"
+                "Output format:\n"
+                "<reasoning>Your engineering thoughts here</reasoning>\n"
+                "```json\n"
+                "[\"step 1\", \"step 2\", ...]\n"
+                "```"
+            )
+            
+            raw_response = await self.call_llm(
+                session_id,
+                plan_prompt,
+                system="You are the lead orchestrator for FineTune Studio.",
+                stream_thoughts=True,
+                parent=event.id,
+            )
+            
+            # Extract JSON from code blocks or raw brackets
+            m = re.search(r"```json\s*(\[.*\])\s*```", raw_response, re.DOTALL)
+            if not m:
+                m = re.search(r"(\[.*\])", raw_response, re.DOTALL)
+            
+            if not m:
+                raise ValueError(f"Could not find JSON array in LLM response: {raw_response[:200]}...")
+            
+            parsed = json.loads(m.group(1))
+            steps = [str(s) for s in parsed][:10]
+        except Exception as e:
+            await self.emit_error(
+                session_id,
+                f"Master Plan generation failed: {str(e)}. "
+                "I'll fall back to a standard roadmap for now."
+            )
+            steps = [
+                "Dataset intake and metadata check",
+                "Deep profiling and health scan",
+                "Hardware VRAM probe",
+                "Task inference and goal setting",
+                "Model search and ranking",
+                "Training strategy optimization",
+                "Pipeline construction and execution"
+            ]
 
         await self.announce(
             session_id,
             phase="plan",
             title="Master plan",
-            summary="I have drafted a custom execution plan for this dataset. The pipeline will now begin execution.",
+            summary="I've deliberated on your project requirements and drafted this roadmap.",
             steps=steps,
-            requires_approval=False,
+            requires_approval=True,
             parent=event.id,
         )
+
+        comment = await self.wait_for_approval(session_id, "plan")
+        while comment:
+            await self.think(session_id, f"Refining the roadmap based on your feedback: '{comment}'")
+            try:
+                refine_prompt = (
+                    f"Original roadmap: {steps}\n"
+                    f"User feedback: '{comment}'\n\n"
+                    "Adjust the roadmap steps. Return ONLY the new JSON array of strings."
+                )
+                plan_text = await self.call_llm(
+                    session_id,
+                    refine_prompt,
+                    system="You are a flexible lead orchestrator.",
+                    stream_thoughts=False,
+                    parent=event.id,
+                )
+                m = re.search(r"(\[.*\])", plan_text, re.DOTALL)
+                if m:
+                    steps = json.loads(m.group(1))
+                    await self.think(session_id, "Roadmap revised. I've incorporated your instructions.")
+            except Exception:
+                pass
+
+            
+            await self.announce(
+                session_id,
+                phase="plan",
+                title="Master plan (Revised)",
+                summary="I have updated the plan based on your feedback. Does this look better?",
+                steps=steps,
+                requires_approval=True,
+                parent=event.id,
+            )
+            comment = await self.wait_for_approval(session_id, "plan")
 
         await self.complete(
             session_id,
             phase="plan",
-            summary="Master plan broadcasted. Starting the cascade.",
+            summary="Master plan finalized. Starting the cascade.",
             parent=event.id,
         )
+
 
     async def _audit_override(self, event: AgentEvent) -> None:
         """The Critic vetoed something. Surface to the user immediately."""

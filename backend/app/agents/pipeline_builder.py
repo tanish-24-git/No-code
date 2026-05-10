@@ -3,6 +3,8 @@ PipelineRecord with config + node graph. Emits PipelineDraftCreated which
 the ApprovalGate routes to either auto-approve or request user approval."""
 from __future__ import annotations
 
+import json
+import re
 from app.agents.base import BaseAgent
 from app.api.schemas.session import FSMState
 from app.events.types import AgentEvent
@@ -43,24 +45,65 @@ class PipelineBuilderAgent(BaseAgent):
             )
             return
 
+        # Socratic Deliberation on the Pipeline Architecture.
+        await self.think(session_id, "Deliberating on the optimal pipeline graph and node wiring...", parent=event.id)
+        
+        deliberation_prompt = (
+            f"Dataset Profile: {json.dumps(profile)}\n"
+            f"Strategy: {json.dumps(strategy)}\n"
+            f"Model: {chosen_model.get('repo_id')}\n\n"
+            "Design the pipeline node graph. Which nodes (dataset, preprocess, balance, split, train, evaluate, export) "
+            "are necessary? How should they be wired? Return a JSON object with 'nodes' (list) and 'edges' (list)."
+        )
+        
+        graph = {"nodes": [], "edges": []}
+        if session.llm_provider:
+            try:
+                res = await self.call_llm(session_id, deliberation_prompt, system="You are a SOTA Pipeline Architect.", parent=event.id)
+                m = re.search(r"\{.*\}", res, re.DOTALL)
+                if m:
+                    graph = json.loads(m.group(0))
+            except Exception:
+                pass
+        
+        if not graph.get("nodes"):
+            nodes, edges = self._build_graph(session.dataset_id, profile, strategy)
+            graph = {"nodes": nodes, "edges": edges}
+
         await self.announce(
             session_id,
             phase="plan",
             title="Drafting the pipeline",
             summary=(
-                f"Wiring dataset -> preprocess -> train ({chosen_model.get('repo_id')}) -> "
-                "evaluate -> export. You'll be asked to approve before training starts."
+                f"I've deliberated on the architecture. I'll wire **{len(graph['nodes'])} nodes** starting from "
+                f"your dataset through to a **{strategy.get('method', 'fine-tuning')}** stage."
             ),
             steps=[
-                "Create pipeline record and apply config",
-                "Build the node graph based on profile (balance / split / train / eval / export)",
-                "Pop each node onto the canvas",
-                "Summarize for your approval",
+                "Compute optimal node sequence",
+                "Inject hardware-aware configurations",
+                "Prepare evaluation and export hooks",
             ],
             outputs=["pipeline draft", "node graph"],
             requires_approval=True,
             parent=event.id,
         )
+
+        comment = await self.wait_for_approval(session_id, "plan")
+        if comment and session.llm_provider:
+            await self.think(session_id, f"Refining pipeline graph based on your feedback: '{comment}'")
+            refine_prompt = (
+                f"Current graph: {json.dumps(graph)}\n"
+                f"User feedback: '{comment}'\n\n"
+                "Adjust the nodes and edges JSON. Return ONLY the new JSON object."
+            )
+            try:
+                res = await self.call_llm(session_id, refine_prompt, system="You are a flexible Pipeline Architect.", parent=event.id)
+                m = re.search(r"\{.*\}", res, re.DOTALL)
+                if m:
+                    graph = json.loads(m.group(0))
+                    await self.think(session_id, "Pipeline architecture revised per your instructions.")
+            except Exception:
+                pass
 
         # 1. Create pipeline.
         if not session.pipeline_id:
@@ -79,7 +122,7 @@ class PipelineBuilderAgent(BaseAgent):
             session_service.attach_pipeline(session, created["id"])
             session = self.get_session(session_id)
 
-        # 2. Apply config.
+        # 2. Apply config (Deliberated)
         cfg = self._build_config(chosen_model, strategy, profile, session)
         reasoning = self._build_reasoning(chosen_model, strategy, profile)
         applied = await self.call_tool(
@@ -91,20 +134,18 @@ class PipelineBuilderAgent(BaseAgent):
             await self.emit_error(session_id, applied["error"])
             return
 
-        # 3. Optionally mutate the graph for prep needs.
-        nodes, edges = self._build_graph(session.dataset_id, profile, strategy)
+        # 3. Apply the deliberated graph
         await self.call_tool(
             "pipeline.mutate_graph",
-            {"pipeline_id": session.pipeline_id, "nodes": nodes, "edges": edges},
+            {"pipeline_id": session.pipeline_id, "nodes": graph["nodes"], "edges": graph["edges"]},
             session_id,
         )
 
-        # 3b. Pop each node into the canvas one-by-one so the user sees the
-        # graph grow as the agent decides on it.
-        for n in nodes:
+        # 4. Pop each node onto the canvas
+        for n in graph["nodes"]:
             await self.materialize_node(session_id, n, parent=event.id)
 
-        # 4. Build a human-readable summary card.
+        # 5. Build summary
         est_minutes = float(event.payload.get("estimated_minutes") or 0.0)
         summary = await self.call_tool(
             "pipeline.summarize_for_user",
@@ -119,7 +160,7 @@ class PipelineBuilderAgent(BaseAgent):
             session_id,
             phase="plan",
             summary=summary.get("title", "pipeline draft ready"),
-            artifacts={"pipeline_id": session.pipeline_id, "node_count": len(nodes)},
+            artifacts={"pipeline_id": session.pipeline_id, "node_count": len(graph["nodes"])},
             parent=event.id,
         )
         await self.emit(
@@ -134,6 +175,7 @@ class PipelineBuilderAgent(BaseAgent):
             parent_event_id=event.id,
         )
         await self.emit_message(session_id, summary.get("title", "Pipeline draft ready") + "\n\n" + summary.get("summary", ""), parent=event.id)
+
 
     # ── builders ──────────────────────────────────────────────────────────
 

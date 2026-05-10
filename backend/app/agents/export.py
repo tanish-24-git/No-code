@@ -24,11 +24,29 @@ class ExportAgent(BaseAgent):
         if event.kind == "EvaluationCompleted":
             if session.state == FSMState.EVALUATING:
                 session_service.advance_state(session, FSMState.AWAITING_EXPORT_CHOICE, reason="awaiting export decision")
-            await self.emit_message(
-                session_id,
-                "Where should I put the trained model? Options: **local**, **HuggingFace**, or **both**.",
-                parent=event.id,
+            # Deliberate on how to present the export choice.
+            eval_data = session.artifacts.get("evaluation") or {}
+            prompt = (
+                f"Training job {session.job_id} completed.\n"
+                f"Final score: {eval_data.get('score')}\n"
+                f"Baseline delta: {eval_data.get('vs_baseline', {}).get('delta')}\n\n"
+                "Explain that the model is ready and ask if they want to save it locally, "
+                "push it to HuggingFace, or both. Be brief but professional."
             )
+            
+            msg = "Where should I put the trained model? Options: **local**, **HuggingFace**, or **both**."
+            if session.llm_provider:
+                try:
+                    msg = await self.call_llm(
+                        session_id,
+                        prompt,
+                        system="You are a deployment engineer. Present the export choice to the user.",
+                        parent=event.id
+                    )
+                except Exception:
+                    pass
+
+            await self.emit_message(session_id, msg, parent=event.id)
             await self.emit(
                 "ExportChoiceRequested",
                 session_id,
@@ -38,6 +56,7 @@ class ExportAgent(BaseAgent):
                 },
                 parent_event_id=event.id,
             )
+
             return
 
         # Both SaveLocalRequested and PushToHFRequested arrive after the user's choice.

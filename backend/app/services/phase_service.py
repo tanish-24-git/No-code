@@ -26,6 +26,7 @@ from app.events.types import AgentEvent
 PHASES = (
     "intake",         # Dataset metadata read
     "profile",        # Token / duplicate / missing / imbalance scan
+    "restructure",    # Raw document transformation
     "hardware",       # Device + VRAM probe
     "task",           # Infer task type
     "model_search",   # HF Hub search + ranking
@@ -41,7 +42,7 @@ PHASES = (
 
 
 # Phases that require explicit user approval before they advance.
-CRITICAL_PHASES = frozenset({"model_search", "plan", "execute", "export"})
+CRITICAL_PHASES = frozenset({"restructure", "model_search", "plan", "execute", "export"})
 
 
 # Optional: which canvas node corresponds to which phase. Multiple phases
@@ -50,6 +51,7 @@ CRITICAL_PHASES = frozenset({"model_search", "plan", "execute", "export"})
 PHASE_TO_NODE: dict[str, str] = {
     "intake":       "dataset",
     "profile":      "preprocess",
+    "restructure":  "preprocess",
     "hardware":     "preprocess",
     "task":         "preprocess",
     "model_search": "model",
@@ -62,6 +64,7 @@ PHASE_TO_NODE: dict[str, str] = {
     "sandbox":      "evaluate",
     "export":       "export",
 }
+
 
 
 @dataclass

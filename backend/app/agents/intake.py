@@ -59,9 +59,15 @@ class DatasetIntakeAgent(BaseAgent):
                 parent=event.id,
             )
 
+            # Socratic deliberation on the dataset purpose.
+            await self.think(session_id, "Analyzing the dataset source and metadata for initial intent...", parent=event.id)
+            
             comment = await self.wait_for_approval(session_id, "intake")
-            if comment:
-                await self.think(session_id, f"User intake feedback: {comment}")
+            if comment and session.llm_provider:
+                await self.think(session_id, f"Processing your feedback: '{comment}'")
+
+
+
 
         # --- Start the work (either after approval or on resume) ---
         await self.emit("IntakeStarted", session_id, payload={"dataset_id": dataset_id})
@@ -84,13 +90,29 @@ class DatasetIntakeAgent(BaseAgent):
         # Friendly chat bubble + outcome forecast.
         cols = info.get("column_names", [])
         col_preview = ", ".join(f"`{c}`" for c in cols[:8]) + ("..." if len(cols) > 8 else "")
-        outcomes = _forecast_outcomes(buckets.get("field_buckets", {}), info)
+
+        # Agentic deliberation on possible outcomes.
+        outcomes_msg = "Possible outcomes I can train towards: instruction-following / chat fine-tune."
+        if session.llm_provider:
+            await self.think(session_id, "Deliberating on training objectives for this data...", parent=event.id)
+            forecast_prompt = (
+                f"Dataset Sample: {sample.get('sample', [])}\n"
+                f"Columns: {cols}\n"
+                f"User instructions: '{comment if 'comment' in locals() else 'none'}'\n\n"
+                "What training outcomes are possible with this data? (e.g., chat, translation, summarization). "
+                "Provide a 1-sentence engineering forecast."
+            )
+            try:
+                outcomes_msg = await self.call_llm(session_id, forecast_prompt, system="You are an expert Data Strategist.", parent=event.id)
+            except Exception:
+                pass
+
         await self.emit_message(
             session_id,
             (
                 f"Got your dataset **{info.get('name')}** - {info.get('row_count')} rows, "
                 f"{len(cols)} columns ({col_preview}).\n\n"
-                f"**Possible outcomes I can train towards:** {outcomes}"
+                f"**Engineering Outlook:** {outcomes_msg}"
             ),
             parent=event.id,
         )

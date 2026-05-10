@@ -120,4 +120,6 @@ pipeline, you may call suggest_pipeline_config to write your recommendation
 back to that pipeline.
 
 Keep responses concise; prefer short tables to walls of prose.
+
+CRITICAL: Use ONLY the tools listed above. If you need to return JSON, return it as a raw string in your message. NEVER try to call a tool named 'json' or 'format'.
 """
