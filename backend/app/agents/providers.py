@@ -32,19 +32,38 @@ def stream_anthropic(
     messages: list[dict[str, Any]],
     use_tools: bool = True,
 ) -> Iterator[str]:
-    """Anthropic Messages API with tool use."""
+    """Anthropic Messages API.
+
+    Two paths:
+        * ``use_tools=False``  - pure text stream. We do NOT register tools
+          and we do NOT engage the tool-call multi-hop loop, so a model
+          that wants to use built-in tools cannot derail the call.
+        * ``use_tools=True``   - the legacy multi-hop tool-use path used
+          by the legacy /api/agent/chat endpoint.
+    """
     from anthropic import Anthropic
 
     client = Anthropic(api_key=api_key, base_url=base_url or None)
+    history = list(messages)
+
+    if not use_tools:
+        # Pure text-stream. No tool registration, no hops, no tool_choice.
+        with client.messages.stream(
+            model=model,
+            max_tokens=2048,
+            system=system,
+            messages=history,
+        ) as stream:
+            for chunk in stream.text_stream:
+                yield chunk
+        return
+
     tools = [
         {"name": t.name, "description": t.description, "input_schema": t.input_schema}
         for t in TOOLS
-    ] if use_tools else []
-    history = list(messages)
+    ]
 
     for _hop in range(8):
-        # We need to filter tool-result messages to ensure they follow tool-use messages.
-        # Anthropic is very strict about this.
         with client.messages.stream(
             model=model,
             max_tokens=2048,
@@ -85,11 +104,77 @@ def stream_openai(
     messages: list[dict[str, Any]],
     use_tools: bool = True,
 ) -> Iterator[str]:
-    """OpenAI Chat Completions API with tool use. base_url lets this provider
-    drive Ollama, LM Studio, vLLM, OpenRouter, Together, Groq, etc."""
+    """OpenAI Chat Completions API. base_url lets this provider drive
+    Ollama, LM Studio, vLLM, OpenRouter, Together, Groq, etc.
+
+    Two execution paths:
+
+        * ``use_tools=False``  - pure text stream. We do NOT pass `tools`
+          or `tool_choice`, and we DO NOT walk the tool-handling loop.
+          If the underlying model emits tool calls anyway (Groq's
+          ``gpt-oss-120b`` is a known offender - it has built-in
+          browser_search and python tools that fire even when no tool
+          list is provided), we silently drop the tool_call deltas and
+          keep the text. This is what every agent's LLM call wants.
+
+        * ``use_tools=True``   - legacy multi-hop tool-use path used by
+          the legacy /api/agent/chat endpoint.
+    """
     from openai import OpenAI
 
     client = OpenAI(api_key=api_key or "sk-not-needed", base_url=base_url or None)
+
+    history: list[dict[str, Any]] = [{"role": "system", "content": system}]
+    for m in messages:
+        if isinstance(m.get("content"), str):
+            history.append({"role": m["role"], "content": m["content"]})
+        else:
+            history.append(m)
+
+    if not use_tools:
+        # Pure text-stream. Some providers (notably Groq's gpt-oss-120b)
+        # reject the request when tools/tool_choice headers conflict with
+        # built-in model tooling. Sending neither field avoids the trap.
+        try:
+            stream = client.chat.completions.create(
+                model=model,
+                messages=history,
+                stream=True,
+            )
+            for chunk in stream:
+                choice = chunk.choices[0] if chunk.choices else None
+                if not choice:
+                    continue
+                delta = choice.delta
+                if delta and delta.content:
+                    yield delta.content
+                # Drop any tool_call deltas the provider emits anyway.
+        except Exception as e:
+            err = str(e).lower()
+            if "tool" in err and ("choice" in err or "called a tool" in err):
+                # Retry with explicit empty tools list + tool_choice="none".
+                try:
+                    stream = client.chat.completions.create(
+                        model=model,
+                        messages=history,
+                        tools=[],
+                        tool_choice="none",
+                        stream=True,
+                    )
+                    for chunk in stream:
+                        choice = chunk.choices[0] if chunk.choices else None
+                        if not choice:
+                            continue
+                        delta = choice.delta
+                        if delta and delta.content:
+                            yield delta.content
+                except Exception as e2:
+                    raise e2
+            else:
+                raise
+        return
+
+    # ── Tool-use multi-hop path ───────────────────────────────────────
     tools = [
         {
             "type": "function",
@@ -100,24 +185,16 @@ def stream_openai(
             },
         }
         for t in TOOLS
-    ] if use_tools else []
-
-    history: list[dict[str, Any]] = [{"role": "system", "content": system}]
-    for m in messages:
-        if isinstance(m.get("content"), str):
-            history.append({"role": m["role"], "content": m["content"]})
-        else:
-            history.append(m)
+    ]
 
     for _hop in range(8):
         stream = client.chat.completions.create(
             model=model,
             messages=history,
-            tools=tools if tools else None,
+            tools=tools,
             stream=True,
         )
 
-        # Reassemble streamed deltas. Tool call deltas arrive piecemeal too.
         assistant_text = ""
         tool_calls: dict[int, dict[str, Any]] = {}
         for chunk in stream:
@@ -141,7 +218,6 @@ def stream_openai(
         if not tool_calls:
             return
 
-        # Append assistant turn as one message including the tool_calls.
         history.append({
             "role": "assistant",
             "content": assistant_text or None,
@@ -155,7 +231,6 @@ def stream_openai(
             ],
         })
 
-        # Execute each tool, append a tool message per call.
         for tc in tool_calls.values():
             try:
                 args = json.loads(tc["args"] or "{}")
