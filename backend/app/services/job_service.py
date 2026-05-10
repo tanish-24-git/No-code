@@ -310,45 +310,151 @@ def _handler_preprocess(job: JobRecord, config: PipelineConfig, node: dict[str, 
 
 
 def _handler_train(job: JobRecord, config: PipelineConfig, node: dict[str, Any], ctx: dict[str, Any], log: LogFn, stop: threading.Event) -> None:
-    """Lightweight, agent-friendly placeholder: simulates an epoch loop and
-    streams metrics. Swapping in a real trainer (LoRATrainer) is a one-liner.
+    """Real fine-tuning. Loads the configured base model, applies LoRA /
+    QLoRA / DoRA per the strategy, runs SFTTrainer (or plain Trainer) on
+    the bound dataset, and saves the adapter to ``models/<job_id>/``.
+
+    If the heavy ML stack is unavailable (no torch / transformers / peft),
+    raises ``TrainingNotAvailable`` which surfaces a clear error to the UI
+    instead of silently producing a stub.
     """
-    epochs = max(config.epochs, 1)
-    job.total_epochs = epochs
-    for epoch in range(1, epochs + 1):
-        if stop.is_set():
-            return
-        # Pretend training: 5 steps per epoch.
-        for step in range(1, 6):
-            if stop.is_set():
-                return
-            time.sleep(0.2)
-            loss = max(0.05, 2.5 / (epoch * step))
-            job.current_epoch = epoch
-            job.current_step += 1
-            job.current_loss = round(loss, 4)
-            job.metrics.append(
-                JobMetric(
-                    step=job.current_step,
-                    epoch=epoch,
-                    loss=job.current_loss,
-                    learning_rate=config.learning_rate,
-                    timestamp=datetime.now(timezone.utc),
-                )
-            )
-            _persist(job)
-            log(f"[METRIC] epoch={epoch} step={job.current_step} loss={job.current_loss}")
-            _publish_metric_event(job)
+    from app.services import dataset_service
+    from app.training.trainer import run_training, TrainingNotAvailable
+
+    ds = dataset_service.get_dataset(config.dataset_id)
+    if not ds:
+        raise ValueError(f"dataset {config.dataset_id} not found")
+    if dataset_service.is_raw_doc(ds):
+        raise ValueError(
+            "trainer received a raw_doc dataset - the restructurer should "
+            "have converted it first"
+        )
+
+    job.total_epochs = max(config.epochs, 1)
     out = settings.models_dir / job.id
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "README.md").write_text(f"# Stub artifact for job {job.id}\n", encoding="utf-8")
-    ctx["model_output_path"] = str(out)
-    log(f"[INFO] saved stub artifact to {out}")
+
+    def _on_step(metric: dict[str, Any]) -> None:
+        job.current_step = int(metric.get("step") or job.current_step + 1)
+        job.current_epoch = int(metric.get("epoch") or job.current_epoch)
+        job.current_loss = round(float(metric.get("loss") or 0.0), 4)
+        job.metrics.append(JobMetric(
+            step=job.current_step,
+            epoch=metric.get("epoch", 0.0),
+            loss=job.current_loss,
+            learning_rate=metric.get("learning_rate", config.learning_rate),
+            timestamp=datetime.now(timezone.utc),
+        ))
+        _persist(job)
+        log(f"[METRIC] step={job.current_step} epoch={metric.get('epoch'):.2f} "
+            f"loss={job.current_loss}")
+        _publish_metric_event(job)
+
+    try:
+        result = run_training(
+            base_model=config.base_model,
+            dataset_path=ds.file_path,
+            dataset_file_type=ds.file_type,
+            out_dir=out,
+            method=config.training_method,
+            precision=config.precision,
+            quantization=getattr(config, "quantization", "none") or "none",
+            epochs=int(config.epochs),
+            batch_size=int(config.batch_size),
+            gradient_accumulation=int(config.gradient_accumulation),
+            learning_rate=float(config.learning_rate),
+            max_seq_len=int(config.max_seq_len),
+            lora_rank=int(config.lora_rank),
+            on_step=_on_step,
+            is_stopped=lambda: stop.is_set(),
+        )
+    except TrainingNotAvailable as e:
+        log(f"[ERROR] training stack not available: {e}")
+        raise
+
+    ctx["model_output_path"] = result["output_path"]
+    log(f"[INFO] training finished. final_loss={result['final_loss']:.4f} "
+        f"steps={result['steps']} adapter={result['output_path']}")
 
 
 def _handler_evaluate(job: JobRecord, config: PipelineConfig, node: dict[str, Any], ctx: dict[str, Any], log: LogFn, stop: threading.Event) -> None:
-    log("[INFO] evaluate: computing metrics (placeholder)")
-    time.sleep(0.2)
+    """Compute final-loss + a held-out score on the trained adapter.
+
+    We re-tokenize the last 10% of the dataset and run a forward pass to
+    get an honest eval-loss number. Skipped gracefully if the trainer
+    didn't run (e.g. ML stack missing) so the rest of the pipeline still
+    completes.
+    """
+    out = ctx.get("model_output_path")
+    if not out or not Path(out).exists():
+        log("[WARN] evaluate: no trained artifact to evaluate")
+        return
+    try:
+        import torch  # type: ignore
+        from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore
+    except Exception:
+        log("[WARN] evaluate: transformers not available - skipping")
+        return
+
+    from app.services import dataset_service
+    ds = dataset_service.get_dataset(config.dataset_id)
+    if not ds:
+        log("[WARN] evaluate: dataset missing")
+        return
+
+    try:
+        tok = AutoTokenizer.from_pretrained(out)
+        model = AutoModelForCausalLM.from_pretrained(out, torch_dtype=torch.float32)
+        model.eval()
+    except Exception as e:
+        log(f"[WARN] evaluate: could not load adapter ({e})")
+        return
+
+    # Load a small held-out slice (last 10% capped at 64 rows).
+    from app.training.trainer import _load_dataset_rows, _row_to_text
+    rows = _load_dataset_rows(ds.file_path, ds.file_type)
+    if not rows:
+        log("[WARN] evaluate: dataset has no rows")
+        return
+    holdout = rows[max(int(len(rows) * 0.9), len(rows) - 64):]
+    if not holdout:
+        holdout = rows[-min(8, len(rows)):]
+
+    chat_fn = None
+    if hasattr(tok, "apply_chat_template") and getattr(tok, "chat_template", None):
+        def chat_fn(messages):
+            return tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+
+    losses: list[float] = []
+    for row in holdout[:32]:
+        if stop.is_set():
+            break
+        text = _row_to_text(row, chat_fn)
+        if not text:
+            continue
+        ids = tok(text, return_tensors="pt", truncation=True,
+                  max_length=int(config.max_seq_len))["input_ids"]
+        with torch.no_grad():
+            try:
+                outp = model(ids, labels=ids)
+                losses.append(float(outp.loss.item()))
+            except Exception:
+                continue
+    if not losses:
+        log("[WARN] evaluate: no losses computed")
+        return
+    avg = sum(losses) / len(losses)
+    score = max(0.0, min(1.0, 1.0 / (1.0 + avg)))
+    job.metrics.append(JobMetric(
+        step=job.current_step,
+        epoch=float(job.current_epoch),
+        loss=round(float(avg), 4),
+        val_loss=round(float(avg), 4),
+        timestamp=datetime.now(timezone.utc),
+    ))
+    _persist(job)
+    log(f"[EVAL] held-out loss={avg:.4f} score={score:.3f} (n={len(losses)})")
+    ctx["evaluation"] = {"final_loss": round(avg, 4), "score": round(score, 3),
+                          "training_steps": job.current_step}
 
 
 def _handler_export(job: JobRecord, config: PipelineConfig, node: dict[str, Any], ctx: dict[str, Any], log: LogFn, stop: threading.Event) -> None:

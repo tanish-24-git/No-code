@@ -450,42 +450,119 @@ async def alchemy_augment_synthetic(args: dict[str, Any], _ctx: ToolContext) -> 
 
 
 @tool(
-    name="alchemy.restructure_text",
+    name="alchemy.chunk_text",
     description=(
-        "Universal text-to-dataset converter. Takes raw text (from PDFs, docs, etc.) "
-        "and uses the LLM to synthesize a structured dataset according to a "
-        "prescribed format (instruct / chat / qa / classification)."
+        "Split a long document into overlapping chunks suitable for "
+        "restructuring into a fine-tuning dataset. Returns a list of "
+        "{id, text} objects."
     ),
     input_schema={
         "type": "object",
         "properties": {
             "text": {"type": "string"},
-            "format": {"type": "string", "enum": ["instruct", "chat", "qa", "classification"]},
-            "max_rows": {"type": "integer", "default": 50},
+            "chunk_chars": {"type": "integer", "default": 4000},
+            "overlap_chars": {"type": "integer", "default": 400},
+        },
+        "required": ["text"],
+    },
+)
+async def alchemy_chunk_text(args: dict[str, Any], _ctx: ToolContext) -> dict[str, Any]:
+    text = str(args.get("text") or "")
+    if not text.strip():
+        return {"chunks": []}
+    chunk = max(int(args.get("chunk_chars") or 4000), 500)
+    overlap = max(int(args.get("overlap_chars") or 400), 0)
+    chunks: list[dict[str, Any]] = []
+    pos = 0
+    cid = 0
+    n = len(text)
+    while pos < n:
+        end = min(pos + chunk, n)
+        # Try to cut on a paragraph boundary inside the last 20% of the chunk
+        # for cleaner pair extraction.
+        if end < n:
+            window_start = max(pos + int(chunk * 0.8), pos)
+            soft_break = text.rfind("\n\n", window_start, end)
+            if soft_break > window_start:
+                end = soft_break
+        slice_ = text[pos:end].strip()
+        if slice_:
+            chunks.append({"id": cid, "text": slice_, "start": pos, "end": end})
+            cid += 1
+        if end >= n:
+            break
+        pos = max(end - overlap, pos + 1)
+    return {"chunks": chunks}
+
+
+@tool(
+    name="alchemy.build_restructure_prompt",
+    description=(
+        "Build the LLM prompt that converts a chunk of raw text into "
+        "training pairs in the requested format. Returns {system, prompt}."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "text": {"type": "string"},
+            "format": {"type": "string"},
+            "user_intent": {"type": "string"},
+            "max_pairs": {"type": "integer", "default": 12},
         },
         "required": ["text", "format"],
     },
-    cost_class="expensive",
 )
-async def alchemy_restructure_text(args: dict[str, Any], _ctx: ToolContext) -> dict[str, Any]:
-    # In this architecture, tools are deterministic or thin wrappers.
-    # The actual LLM logic for restructuring is complex, so we return a
-    # template/prompt that the calling agent can use with its `call_llm` method.
-    fmt = args["format"]
-    text_sample = args["text"][:8000] # Cap for context window safety
-    
-    prompts = {
-        "instruct": "Turn the following text into a list of Instruction/Response pairs. The instruction should be a task, and the response should be the answer based on the text.",
-        "chat": "Turn the following text into a multi-turn dialogue between a User and an AI Assistant based on the information provided.",
-        "qa": "Generate a list of Question/Answer pairs from this text.",
-        "classification": "Identify the key categories/labels in this text and provide examples of snippets for each category."
+async def alchemy_build_restructure_prompt(args: dict[str, Any], _ctx: ToolContext) -> dict[str, Any]:
+    fmt = (args.get("format") or "instruction").lower()
+    text = str(args.get("text") or "")[:12000]
+    user_intent = str(args.get("user_intent") or "").strip()
+    max_pairs = max(1, int(args.get("max_pairs") or 12))
+
+    spec_by_format = {
+        "instruction": (
+            "Each pair has: instruction (a task the model should perform), "
+            "optional input (extra context), output (the correct response). "
+            "Keep instructions actionable. Cover diverse skills the text supports."
+        ),
+        "instruct": (
+            "Same as 'instruction'."
+        ),
+        "chat": (
+            "Each pair is a 'messages' list of {role, content} alternating "
+            "user and assistant turns. 2-6 turns. Roles must be 'user' or "
+            "'assistant'. Conversations should feel natural and grounded "
+            "in the source."
+        ),
+        "qa": (
+            "Each pair has: question (something a curious reader would ask), "
+            "answer (a complete answer using only information present in "
+            "the text)."
+        ),
+        "classification": (
+            "Each pair has: input (a snippet from the text) and label (a "
+            "concise category derived from the snippet). Provide a "
+            "consistent label vocabulary across pairs."
+        ),
     }
-    
-    return {
-        "prompt": prompts.get(fmt, prompts["instruct"]),
-        "context": text_sample,
-        "format": fmt
-    }
+    spec = spec_by_format.get(fmt, spec_by_format["instruction"])
+
+    intent_block = (
+        f"\nUser intent for this dataset: {user_intent}\n" if user_intent else ""
+    )
+
+    system = (
+        "You are a data engineering specialist. Convert raw text into "
+        "high-quality fine-tuning pairs. Be faithful to the source - never "
+        "fabricate facts. Output strictly valid JSON."
+    )
+    prompt = (
+        f"Convert the SOURCE TEXT into up to {max_pairs} fine-tuning pairs.\n"
+        f"Format: {fmt}\n{spec}\n{intent_block}\n"
+        "Return a single JSON object: {\"pairs\": [...]}\n"
+        "Wrap the JSON in a ```json ... ``` fence.\n\n"
+        f"=== SOURCE TEXT ===\n{text}\n=== END ==="
+    )
+    return {"system": system, "prompt": prompt, "format": fmt, "max_pairs": max_pairs}
 
 
 

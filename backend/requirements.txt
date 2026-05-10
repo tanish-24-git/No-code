@@ -30,6 +30,7 @@ accelerate==0.30.0
 datasets==2.19.0
 sentencepiece==0.2.0
 huggingface-hub==0.23.0
+trl==0.9.4
 
 # Dev
 pytest==8.2.0

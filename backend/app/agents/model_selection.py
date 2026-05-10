@@ -1,30 +1,34 @@
 """ModelSelectionAgent.
 
-Two-stage selection:
+Honors any user directive ("use llama", "stick to 1B models") that was
+captured anywhere upstream by reading the global directives bus before
+searching, and again before resolving a comment on its own approval card.
 
-    1. Search the HuggingFace Hub (``model.search_hf``) for instruct-tuned
-       base models that fit the user's task and hardware budget.
-    2. Score the returned candidates with the deterministic ranker
-       (``model.rank_candidates``) so the chosen model has a defensible
-       rationale even when the LLM is in deterministic mode.
+Three stages:
 
-If the Hub is unreachable, ``model.search_hf`` falls back to the curated
-catalogue automatically; this agent does not need to know which path was
-taken. The result is the same shape either way.
+    1. Pull family / size hints from directives.
+    2. Live HF Hub search filtered by those hints + hardware budget.
+    3. Deterministic ranker against (hardware * profile * task).
+
+If the user comments on the proposed top candidate ("give me Llama 3.2 1B"),
+we use ``call_llm_typed(ModelChoiceResolution)`` to extract a structured
+intent and pick the closest match across the FULL search results. Falls
+back to fuzzy matching when no LLM is configured.
 """
 from __future__ import annotations
 
 from app.agents.base import BaseAgent
+from app.agents.schemas import ModelChoiceResolution
 from app.events.types import AgentEvent
 from app.services import decision_log, session_service
+from app.services import directives as directives_service
 
 
 class ModelSelectionAgent(BaseAgent):
     name = "ModelSelectionAgent"
     role = "Search the Hub, then rank candidates against hardware, dataset, and task."
+    directive_scope = "model"
     allowed_tools = ("model.search_hf", "model.rank_candidates", "model.estimate_fit", "audit.write")
-    # Triggered when both hardware AND task are available; we listen to both
-    # and self-gate on artifact presence.
     triggers = ("HardwareProfileCompleted", "PipelineDraftRequested")
 
     async def handle(self, event: AgentEvent) -> None:
@@ -37,71 +41,111 @@ class ModelSelectionAgent(BaseAgent):
         task = session.artifacts.get("task_inference")
         if not hw or not task:
             return  # Will fire again on the other event.
-        if session.artifacts.get("candidate_models"):
-            return  # Already done.
+        if session.artifacts.get("chosen_model"):
+            return  # Already settled.
 
-        # Stage 1: live Hub search.
-        await self.think(session_id, "Searching HuggingFace Hub for models that fit your data...", parent=event.id)
-        
+        await self.materialize_node(
+            session_id,
+            {"id": "model", "type": "model", "position": {"x": 440, "y": 80},
+             "data": {"label": "model"}},
+            parent=event.id,
+        )
+        await self.materialize_edge(
+            session_id,
+            {"id": "e-preprocess-model", "source": "preprocess", "target": "model", "animated": True},
+            parent=event.id,
+        )
+
+        # 1. Read user directives (e.g. "use Llama") set on any prior phase.
+        hints = directives_service.model_hints(session_id)
+        family = hints.get("family")
+        size_b = hints.get("size_b")
+        repo_id_hint = hints.get("repo_id")
+
+        await self.think(
+            session_id,
+            (
+                "Searching HuggingFace Hub. "
+                + (f"Honoring user hint: family={family}, size~{size_b}B. "
+                   if (family or size_b) else "No specific family hint - using broad search. ")
+            ),
+            parent=event.id,
+        )
+
+        # 2. Live search.
         chosen_task = task.get("chosen", "instruction")
-        # If the task is specialized (e.g. stock price, medical), use it as a query.
-        is_specialized = chosen_task not in ("instruction", "chat", "qa", "classification", "extraction")
-        
         searched = await self.call_tool(
             "model.search_hf",
             {
                 "task": chosen_task,
-                "query": chosen_task if is_specialized else None,
+                "family_hint": family,
+                "size_hint_b": size_b,
                 "hardware": hw,
-                "instruct_only": not is_specialized, # Don't limit to instruct if specialized
+                "precision": (session.artifacts.get("strategy") or {}).get("precision", "bf16"),
+                "method": (session.artifacts.get("strategy") or {}).get("method", "lora"),
+                "instruct_only": True,
                 "top_n": 12,
             },
             session_id,
         )
-
-
         if "error" in searched and not searched.get("candidates"):
             await self.emit_error(session_id, searched["error"])
             return
 
         hub_candidates = searched.get("candidates") or []
-        
-        # Stage 2: deterministic ranking against the joint context.
+        if not hub_candidates:
+            await self.emit_error(
+                session_id,
+                "no candidate models fit the device budget - "
+                "try a smaller family hint or attach a GPU",
+            )
+            return
+
+        # 3. Deterministic rank.
         ranked = await self.call_tool(
             "model.rank_candidates",
             {
                 "hardware": hw,
                 "profile": profile,
                 "task": task,
-                "top_n": 10,
+                "top_n": 8,
                 "shortlist": hub_candidates,
             },
             session_id,
         )
-        if "error" in ranked:
-            await self.emit_error(session_id, ranked["error"])
-            return
-
         candidates = ranked.get("candidates") or []
         if not candidates:
-            await self.emit_error(session_id, "no candidate models scored above the fit threshold")
+            await self.emit_error(session_id, "no candidate scored above the fit threshold")
             return
 
-        # Present the candidates to the user.
-        candidate_list_str = "\n".join([f"{i+1}. {c['label']} ({c['repo_id']}) - {c['params_b']}B" for i, c in enumerate(candidates[:5])])
-        
+        # If a specific repo_id was hinted, prefer the exact match.
+        if repo_id_hint:
+            match = next((c for c in candidates if c["repo_id"].lower() == repo_id_hint.lower()), None)
+            if match:
+                candidates = [match] + [c for c in candidates if c is not match]
+
+        candidate_list_str = "\n".join(
+            f"{i + 1}. {c['label']} ({c['repo_id']}) - {c['params_b']}B"
+            for i, c in enumerate(candidates[:5])
+        )
+
         await self.announce(
             session_id,
             phase="model_search",
-            title="Model Selection",
+            title="Model selection",
             summary=(
-                f"I've found {len(candidates)} candidates. The top recommendation is **{candidates[0]['label']}**. "
-                f"You can approve this or comment to pick another one from the list:\n\n{candidate_list_str}"
+                f"Found {len(candidates)} candidates"
+                + (f" matching '{family}'" if family else "")
+                + f". Top recommendation: **{candidates[0]['label']}**.\n\n"
+                f"{candidate_list_str}\n\n"
+                "Approve to use the top one, or comment to pick a "
+                "specific model (e.g. 'use llama 3.2 1B')."
             ),
             steps=[
                 "Filter Hub for instruct-tuned models",
+                "Apply user directive hints",
                 "Rank by VRAM and parameter efficiency",
-                "Validate chat template compatibility"
+                "Validate chat template compatibility",
             ],
             requires_approval=True,
             parent=event.id,
@@ -110,33 +154,8 @@ class ModelSelectionAgent(BaseAgent):
         chosen = candidates[0]
         comment = await self.wait_for_approval(session_id, "model_search")
 
-        
-        if comment and session.llm_provider:
-            await self.think(session_id, f"Processing your feedback: '{comment}'")
-            # Use LLM to resolve the chosen model from the comment.
-            prompt = (
-                f"User feedback: '{comment}'\n\n"
-                f"Top Candidates:\n{candidate_list_str}\n\n"
-                "The user wants to pick a model. Identify the HuggingFace repo_id (e.g., 'meta-llama/Llama-3.2-1B-Instruct') "
-                "they are asking for. Return ONLY the repo_id. If they aren't asking for a specific model, "
-                "return the current choice."
-            )
-            resolved_id = await self.call_llm(session_id, prompt, system="You are an expert model identifier.", parent=event.id)
-            resolved_id = resolved_id.strip().strip('"').strip("'").split(" ")[0] # Grab first word/id
-            
-            # 1. Check top candidates
-            match = next((c for c in candidates if resolved_id.lower() in c['repo_id'].lower()), None)
-            
-            # 2. Check full search results if not in top candidates
-            if not match:
-                full_list = searched.get("candidates", [])
-                match = next((c for c in full_list if resolved_id.lower() in c['repo_id'].lower()), None)
-            
-            if match:
-                chosen = match
-                await self.think(session_id, f"Switching choice to **{chosen['label']}** ({chosen['repo_id']}) based on your feedback.")
-            else:
-                await self.think(session_id, f"I couldn't find a model matching '{resolved_id}' in the Hub search results. Keeping **{chosen['label']}**.")
+        if comment:
+            chosen = await self._resolve_comment(session_id, comment, candidates, searched, event.id) or chosen
 
         session_service.attach_artifact(session, "candidate_models", candidates)
         session_service.attach_artifact(session, "chosen_model", chosen)
@@ -145,21 +164,26 @@ class ModelSelectionAgent(BaseAgent):
             session_id=session_id,
             agent=self.name,
             kind="model_choice",
-            inputs={"hardware": hw, "profile": profile, "task": task, "comment": comment},
+            inputs={"hardware": hw, "profile": profile, "task": task, "comment": comment, "hints": hints},
             candidates=candidates,
             chosen=chosen.get("repo_id"),
             confidence=float(chosen.get("score", 0.0)),
             rationale="; ".join(chosen.get("reasons", [])),
         )
 
+        await self.emit_message(
+            session_id,
+            f"Picked **{chosen['label']}** ({chosen['repo_id']}) - "
+            f"{', '.join(chosen.get('reasons', [])[:3])}.",
+            parent=event.id,
+        )
         await self.complete(
             session_id,
             phase="model_search",
-            summary=f"Selected {chosen['repo_id']}",
+            summary=f"chose {chosen['repo_id']} ({chosen['params_b']}B)",
             artifacts={"chosen_repo_id": chosen.get("repo_id")},
             parent=event.id,
         )
-
         await self.emit(
             "CandidateModelsRanked",
             session_id,
@@ -168,3 +192,72 @@ class ModelSelectionAgent(BaseAgent):
             decision_id=d.id,
         )
 
+    async def _resolve_comment(
+        self,
+        session_id: str,
+        comment: str,
+        candidates: list[dict],
+        searched: dict,
+        parent: str,
+    ) -> dict | None:
+        """Map a user comment like 'use llama 3.2 1B' onto the closest
+        candidate, using the LLM with strict JSON validation when available
+        and fuzzy substring matching otherwise."""
+        await self.think(session_id, f"Mapping your feedback to a concrete model id: '{comment}'", parent=parent)
+
+        # Try LLM-typed resolution first.
+        resolution = await self.call_llm_typed(
+            session_id,
+            (
+                f"User feedback: {comment}\n\n"
+                f"Available candidates:\n" + "\n".join(
+                    f"- {c['repo_id']} ({c['params_b']}B)" for c in candidates[:8]
+                ) + "\n\n"
+                "Identify which candidate matches the user's request. "
+                "Return JSON with: repo_id (exact id from the list when possible), "
+                "family (e.g. 'llama'), size_b (number), rationale."
+            ),
+            ModelChoiceResolution,
+            system="You map natural-language model requests onto repo ids.",
+            stream_thoughts=False,
+            parent=parent,
+        )
+        target_repo: str | None = None
+        target_family: str | None = None
+        target_size: float | None = None
+        if resolution:
+            target_repo = resolution.repo_id
+            target_family = (resolution.family or "").lower() or None
+            target_size = resolution.size_b
+
+        # Fallback: extract from the comment itself.
+        if not target_family and not target_repo:
+            lower = comment.lower()
+            for fam in ("llama", "qwen", "phi", "mistral", "gemma", "smollm",
+                         "deepseek", "yi", "tinyllama"):
+                if fam in lower:
+                    target_family = fam
+                    break
+
+        # Hunt the candidate list, then the full search results.
+        full_list = (searched.get("candidates") or []) + candidates
+        if target_repo:
+            for c in full_list:
+                if c["repo_id"].lower() == target_repo.lower():
+                    return c
+            for c in full_list:
+                if target_repo.lower() in c["repo_id"].lower():
+                    return c
+        if target_family:
+            best = None
+            for c in full_list:
+                if target_family in c["repo_id"].lower():
+                    if target_size is None:
+                        return c
+                    if best is None or abs(c["params_b"] - target_size) < abs(best["params_b"] - target_size):
+                        best = c
+            if best:
+                return best
+
+        await self.think(session_id, "Could not match the requested model in the search results.", parent=parent)
+        return None

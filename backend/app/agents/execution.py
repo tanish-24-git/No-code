@@ -1,5 +1,5 @@
-"""ExecutionAgent: actually starts the training job once the pipeline has
-been approved (auto or by user)."""
+"""ExecutionAgent: starts the training job once the pipeline has been
+approved (auto or by user)."""
 from __future__ import annotations
 
 from app.agents.base import BaseAgent
@@ -11,6 +11,7 @@ from app.services import job_service, session_service
 class ExecutionAgent(BaseAgent):
     name = "ExecutionAgent"
     role = "Start the training job for an approved pipeline."
+    directive_scope = "training"
     allowed_tools = ("job.start", "job.stop", "audit.write")
     triggers = ("PipelineApproved",)
 
@@ -27,7 +28,7 @@ class ExecutionAgent(BaseAgent):
             session_id,
             phase="execute",
             title="Starting training",
-            summary="Approved. Spinning up the training worker now.",
+            summary="Spinning up the training worker now.",
             steps=["Allocate the worker", "Stream loss + step metrics live"],
             outputs=["job_id"],
             parent=event.id,
@@ -43,7 +44,7 @@ class ExecutionAgent(BaseAgent):
         job_id = result["job_id"]
         session_service.attach_job(session, job_id)
         job_service.bind_job_to_session(job_id, session_id)
-        await self.emit_message(session_id, f"Training started (job `{job_id[:8]}`).", parent=event.id)
+        await self.emit_message(session_id, f"Training started (job {job_id[:8]}).", parent=event.id)
         await self.complete(
             session_id,
             phase="execute",

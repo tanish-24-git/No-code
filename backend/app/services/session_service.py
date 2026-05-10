@@ -70,7 +70,7 @@ def list_all() -> list[SessionListItem]:
         try:
             s = AgentSession(**raw)
             out.append(SessionListItem(
-                id=s.id, dataset_id=s.dataset_id, state=s.state,
+                id=s.id, name=s.name, dataset_id=s.dataset_id, state=s.state,
                 pipeline_id=s.pipeline_id, job_id=s.job_id,
                 confidence=s.confidence,
                 created_at=s.created_at, updated_at=s.updated_at,
@@ -143,6 +143,15 @@ def attach_artifact(session: AgentSession, key: str, value: Any) -> AgentSession
 def attach_pipeline(session: AgentSession, pipeline_id: str) -> AgentSession:
     def _updater(s: AgentSession) -> None:
         s.pipeline_id = pipeline_id
+    return _update_atomic(session, _updater)
+
+
+def set_dataset(session: AgentSession, dataset_id: str) -> AgentSession:
+    """Re-bind the session to a new dataset. Used by the restructurer when
+    it converts a raw doc into a structured dataset and wants the rest of
+    the pipeline to run against the new dataset transparently."""
+    def _updater(s: AgentSession) -> None:
+        s.dataset_id = dataset_id
     return _update_atomic(session, _updater)
 
 

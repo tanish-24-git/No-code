@@ -6,7 +6,6 @@ from __future__ import annotations
 from app.agents.base import BaseAgent
 from app.api.schemas.session import FSMState
 from app.events.types import AgentEvent
-from app.orchestration.catalog import build_question
 from app.services import session_service
 
 

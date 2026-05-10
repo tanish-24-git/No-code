@@ -1,55 +1,40 @@
-"""OrchestratorAgent: opens the session, broadcasts the master plan, and
-handles audit overrides.
+"""OrchestratorAgent: opens the session, broadcasts the master plan,
+records user comments globally, and handles audit overrides.
 
-It is the only agent that runs synchronously inside the upload request
-handler - everything else is event-driven from the bus.
+When the LLM is configured, the orchestrator asks it for a custom plan
+tailored to the dataset's kind. When it isn't, the plan is computed
+deterministically from the dataset metadata - so the system is honest
+about the mode it's running in without hard-failing.
 
-When the LLM probe at session start succeeded ("full_agent" mode), the
-orchestrator can ask the configured provider for a custom plan. When the
-probe failed ("deterministic" mode), it falls back to the static plan
-below so the user still gets a roadmap.
+Crucially, every comment on the master plan is recorded as a *global*
+directive (via wait_for_approval -> directives_service.record), so all
+downstream agents read it before deciding anything.
 """
 from __future__ import annotations
 
-import json
-import re
-
 from app.agents.base import BaseAgent
-from app.api.schemas.session import FSMState
+from app.agents.schemas import MasterPlanResponse
 from app.events.types import AgentEvent
-from app.services import session_service
+from app.services import dataset_service, session_service
 
 
-
-
-_PLAN_SYSTEM_PROMPT = (
-    "You are the lead orchestrator for FineTune Studio. Generate a concrete "
-    "6-8 step execution plan for the user's fine-tuning session covering: "
-    "data alchemy, hardware analysis, task inference, model search, strategy, "
-    "pipeline construction, training, evaluation, and export. "
-    "Return ONLY a JSON array of short strings."
-)
+# Phase used by THIS agent's approval gate. Different from PipelineBuilder's
+# phase="plan" so the two never collide on a single PhaseApproved event.
+_PHASE = "master_plan"
 
 
 class OrchestratorAgent(BaseAgent):
     name = "OrchestratorAgent"
-    role = "Voice of the studio. Greets and broadcasts the master plan."
+    role = "Voice of the studio. Greets, plans, and records global directives."
+    directive_scope = "global"
     allowed_tools = ()
-    triggers = ("SessionStarted", "AuditOverride", "PhaseApproved")
+    triggers = ("SessionStarted", "AuditOverride")
 
     async def handle(self, event: AgentEvent) -> None:
         if event.kind == "SessionStarted":
             await self._open(event)
         elif event.kind == "AuditOverride":
             await self._audit_override(event)
-        elif event.kind == "PhaseApproved":
-            if event.payload.get("phase") == "plan":
-                await self.complete(
-                    event.session_id,
-                    phase="plan",
-                    summary="Master plan approved. Starting the cascade.",
-                    parent=event.id,
-                )
 
     async def _open(self, event: AgentEvent) -> None:
         session_id = event.session_id
@@ -60,144 +45,122 @@ class OrchestratorAgent(BaseAgent):
 
         if mode == "full_agent" and provider and model:
             mode_note = (
-                f"Connected to {provider} / {model} in {probe.get('latency_ms', 0):.0f} ms - "
+                f"Connected to {provider} / {model} in {probe.get('latency_ms', 0):.0f}ms - "
                 "running in full agent mode."
             )
         else:
             detail = probe.get("detail") or "no LLM provider configured"
             mode_note = (
-                f"LLM probe failed ({detail}). I will run in deterministic mode - "
-                "the pipeline still works, but I can't paraphrase, search, or reason "
-                "with an LLM until a provider is configured in Settings."
+                f"Running in deterministic mode ({detail}). "
+                "The pipeline still works end-to-end. Configure an LLM "
+                "provider in Settings to unlock data restructuring, "
+                "agent reasoning, and natural-language directives."
             )
 
         await self.emit_message(
             session_id,
-            "Session online. I'll narrate every phase and pause for your "
-            "approval on the critical ones.\n\n" + mode_note,
+            "Session online. I will narrate every phase and pause for "
+            "your approval on the critical ones.\n\n" + mode_note,
             parent=event.id,
         )
 
-
-        # In full-agent mode, ask the LLM for a custom plan.
-        if mode != "full_agent":
-             await self.emit_error(
-                 session_id,
-                 f"Agent activation failed: {probe.get('detail', 'no LLM provider configured')}. "
-                 "Configure a valid OpenAI/Anthropic/Groq key in Settings to use the agentic pipeline."
-             )
-             return
-
+        # Compute the steps. If LLM is on, ask for a tailored plan;
+        # otherwise use a plan computed from the dataset kind.
         session = self.get_session(session_id)
-        ds_id = session.dataset_id if session else "this dataset"
-        
-        await self.think(session_id, "Deliberating on a custom execution plan for your data...", parent=event.id)
-        
-        try:
-            # We use a multi-stage prompt to ensure we get both reasoning and JSON.
-            plan_prompt = (
-                f"I am initializing a fine-tuning session for dataset {ds_id}.\n\n"
-                "Task: Generate a concrete 6-8 step execution plan.\n"
-                "Requirements:\n"
-                "1. Cover intake, profiling, hardware probe, task inference, model search, strategy, and training.\n"
-                "2. If raw docs are present, include a restructuring phase.\n"
-                "3. Think like a SOTA AI engineer. Be precise.\n\n"
-                "Output format:\n"
-                "<reasoning>Your engineering thoughts here</reasoning>\n"
-                "```json\n"
-                "[\"step 1\", \"step 2\", ...]\n"
-                "```"
-            )
-            
-            raw_response = await self.call_llm(
+        steps = self._compute_default_steps(session)
+
+        if mode == "full_agent":
+            tailored = await self.call_llm_typed(
                 session_id,
-                plan_prompt,
+                (
+                    f"Default plan steps: {steps}\n\n"
+                    "Refine these into a concrete 6-9 step execution plan "
+                    "for this user's session. Honor any standing user "
+                    "directives. Return ONLY: {\"steps\": [\"step 1\", ...]}"
+                ),
+                MasterPlanResponse,
                 system="You are the lead orchestrator for FineTune Studio.",
-                stream_thoughts=True,
+                stream_thoughts=False,
                 parent=event.id,
             )
-            
-            # Extract JSON from code blocks or raw brackets
-            m = re.search(r"```json\s*(\[.*\])\s*```", raw_response, re.DOTALL)
-            if not m:
-                m = re.search(r"(\[.*\])", raw_response, re.DOTALL)
-            
-            if not m:
-                raise ValueError(f"Could not find JSON array in LLM response: {raw_response[:200]}...")
-            
-            parsed = json.loads(m.group(1))
-            steps = [str(s) for s in parsed][:10]
-        except Exception as e:
-            await self.emit_error(
-                session_id,
-                f"Master Plan generation failed: {str(e)}. "
-                "I'll fall back to a standard roadmap for now."
-            )
-            steps = [
-                "Dataset intake and metadata check",
-                "Deep profiling and health scan",
-                "Hardware VRAM probe",
-                "Task inference and goal setting",
-                "Model search and ranking",
-                "Training strategy optimization",
-                "Pipeline construction and execution"
-            ]
+            if tailored and tailored.steps:
+                steps = [str(s) for s in tailored.steps][:10]
+
+        # Persist the plan as an artifact so every downstream agent can
+        # reference it via the shared-context block.
+        if session:
+            session_service.attach_artifact(session, "master_plan", {"steps": steps})
 
         await self.announce(
             session_id,
-            phase="plan",
+            phase=_PHASE,
             title="Master plan",
-            summary="I've deliberated on your project requirements and drafted this roadmap.",
+            summary="Approve to kick the swarm off, or comment to adjust.",
             steps=steps,
             requires_approval=True,
             parent=event.id,
         )
 
-        comment = await self.wait_for_approval(session_id, "plan")
-        while comment:
-            await self.think(session_id, f"Refining the roadmap based on your feedback: '{comment}'")
-            try:
-                refine_prompt = (
-                    f"Original roadmap: {steps}\n"
-                    f"User feedback: '{comment}'\n\n"
-                    "Adjust the roadmap steps. Return ONLY the new JSON array of strings."
-                )
-                plan_text = await self.call_llm(
-                    session_id,
-                    refine_prompt,
-                    system="You are a flexible lead orchestrator.",
-                    stream_thoughts=False,
-                    parent=event.id,
-                )
-                m = re.search(r"(\[.*\])", plan_text, re.DOTALL)
-                if m:
-                    steps = json.loads(m.group(1))
-                    await self.think(session_id, "Roadmap revised. I've incorporated your instructions.")
-            except Exception:
-                pass
+        comment = await self.wait_for_approval(session_id, _PHASE)
+        # Loop on comments, but cap at 3 revisions to avoid infinite loops.
+        revisions = 0
+        while comment and revisions < 3:
+            revisions += 1
+            tailored = await self.call_llm_typed(
+                session_id,
+                (
+                    f"Original plan: {steps}\n"
+                    f"User comment: {comment}\n\n"
+                    "Adjust the plan accordingly. Return ONLY "
+                    "{\"steps\": [\"...\"]}"
+                ),
+                MasterPlanResponse,
+                system="You are a flexible lead orchestrator.",
+                stream_thoughts=False,
+                parent=event.id,
+            )
+            if tailored and tailored.steps:
+                steps = [str(s) for s in tailored.steps][:10]
+                if session:
+                    session_service.attach_artifact(session, "master_plan", {"steps": steps})
 
-            
             await self.announce(
                 session_id,
-                phase="plan",
-                title="Master plan (Revised)",
-                summary="I have updated the plan based on your feedback. Does this look better?",
+                phase=_PHASE,
+                title="Master plan (revised)",
+                summary="Updated per your feedback. Approve or keep commenting.",
                 steps=steps,
                 requires_approval=True,
                 parent=event.id,
             )
-            comment = await self.wait_for_approval(session_id, "plan")
+            comment = await self.wait_for_approval(session_id, _PHASE)
 
         await self.complete(
             session_id,
-            phase="plan",
-            summary="Master plan finalized. Starting the cascade.",
+            phase=_PHASE,
+            summary="Master plan approved. Starting the cascade.",
             parent=event.id,
         )
 
+    def _compute_default_steps(self, session) -> list[str]:
+        """Compute the plan from the dataset kind. Raw docs add a
+        restructure step; structured datasets skip it."""
+        steps = ["Read dataset metadata"]
+        ds = dataset_service.get_dataset(session.dataset_id) if session else None
+        if dataset_service.is_raw_doc(ds):
+            steps.append("Restructure raw text into training pairs")
+        steps.extend([
+            "Profile token lengths, duplicates, missing values",
+            "Probe local hardware",
+            "Search HuggingFace for a base model that fits",
+            "Pick a training strategy (LoRA / QLoRA / DoRA)",
+            "Draft and approve the pipeline graph",
+            "Train, monitor, recover, evaluate",
+            "Save locally or push to HF on your command",
+        ])
+        return steps
 
     async def _audit_override(self, event: AgentEvent) -> None:
-        """The Critic vetoed something. Surface to the user immediately."""
         p = event.payload or {}
         await self.emit_message(
             event.session_id,
@@ -205,10 +168,3 @@ class OrchestratorAgent(BaseAgent):
             f"Recommendation: {p.get('advice', 'review the agent activity log')}.",
             parent=event.id,
         )
-
-
-def _master_plan_md(steps: list[str], mode: str) -> str:
-    lines = ["## Master plan", "", f"_Mode: {mode}_", "", "**Phases:**"]
-    for i, s in enumerate(steps, 1):
-        lines.append(f"{i}. {s}")
-    return "\n".join(lines)

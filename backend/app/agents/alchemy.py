@@ -1,25 +1,13 @@
-"""DataAlchemistAgent — turns 'crap' into 'fortune' (blueprint §4).
+"""DataAlchemistAgent — grades data health for fine-tuning readiness.
 
-Sits between the deterministic ``DatasetProfilingAgent`` and the
-``TaskInferenceAgent`` and adds the Socratic data-health step:
-
-    1. Reads the just-completed profile.
-    2. Computes a Data Health Report (duplicate, missing, low-entropy,
-       sensitive-field hits, schema fragmentation).
-    3. Posts the report on the blackboard and emits a ``DataHealthReport``
-       event that the UI renders as a dedicated card.
-    4. If issues are severe, surfaces a *blocking* recommendation as an
-       ``AgentAsking`` event; otherwise it streams the verdict and lets
-       the pipeline continue.
-
-This agent is the embodiment of the blueprint's "Data is King" commandment:
-it pauses before wasting compute on poor data.
+Sits between profiling and the rest of the pipeline. Reads the profile,
+asks the LLM (when configured) for a strict-JSON DataHealthReport, and
+falls back to a deterministic verdict computed from the metrics.
 """
 from __future__ import annotations
 
-from typing import Any
-
 from app.agents.base import BaseAgent
+from app.agents.schemas import DataHealthReport
 from app.events.types import AgentEvent
 from app.services import session_service
 
@@ -27,6 +15,7 @@ from app.services import session_service
 class DataAlchemistAgent(BaseAgent):
     name = "DataAlchemistAgent"
     role = "Detects data-quality risks and surfaces the Data Health Report."
+    directive_scope = "data"
     allowed_tools = (
         "alchemy.semantic_dedup",
         "alchemy.entropy_filter",
@@ -43,52 +32,30 @@ class DataAlchemistAgent(BaseAgent):
         profile = event.payload.get("profile") or {}
         dataset_id = event.payload.get("dataset_id")
 
-        await self.think(
-            session.id,
-            "Profile is in. I'm grading data health (duplicates, missing values, "
-            "low-entropy boilerplate, sensitive-info leaks, schema fragmentation) "
-            "before we plan training.",
+        # 1. Try LLM-typed.
+        report_obj = await self.call_llm_typed(
+            event.session_id,
+            (
+                f"Dataset profile:\n"
+                f"- Row count: {profile.get('row_count')}\n"
+                f"- Duplicates: {profile.get('duplicates', {}).get('duplicate_pct') or 0}%\n"
+                f"- Missing values: {profile.get('missing', {}).get('per_column')}\n"
+                f"- Class balance: {profile.get('imbalance', {}).get('minority_pct') or 100}%\n\n"
+                "Grade fine-tuning readiness as healthy / advisory / "
+                "needs_attention / blocking. Return JSON with verdict, "
+                "score (0..1), summary, asks."
+            ),
+            DataHealthReport,
+            system="You are a meticulous data scientist.",
+            stream_thoughts=False,
             parent=event.id,
         )
 
-        # Deliberate on data health using the LLM.
-        prompt = (
-            f"Dataset Profile:\n"
-            f"- Row count: {profile.get('row_count')}\n"
-            f"- Duplicates: {profile.get('duplicates', {}).get('duplicate_pct') or 0}%\n"
-            f"- Missing values: {profile.get('missing', {}).get('per_column')}\n"
-            f"- Class balance: {profile.get('imbalance', {}).get('minority_pct') or 100}%\n\n"
-            "Assess the data health for fine-tuning. Is it 'healthy', 'advisory', 'needs_attention', or 'blocking'? "
-            "Explain why in a short summary. If there are severe issues, propose a specific question (ask) for the user. "
-            "Return a JSON object with 'verdict', 'score' (0.0 to 1.0), 'summary', and 'asks' (list of strings)."
-        )
-        
-        # Default report as safety fallback
-        report = {
-            "verdict": "healthy",
-            "score": 1.0,
-            "summary": "clean dataset; no remediation suggested",
-            "asks": [],
-            "confidence": 0.9
-        }
-        
-        if session.llm_provider:
-            try:
-                import json, re
-                res_text = await self.call_llm(
-                    session.id,
-                    prompt,
-                    system="You are a Socratic data scientist. Grade data quality strictly for fine-tuning readiness.",
-                    parent=event.id
-                )
-
-                m = re.search(r"\{.*\}", res_text, re.DOTALL)
-                if m:
-                    res_json = json.loads(m.group(0))
-                    report.update(res_json)
-                    report["confidence"] = round(0.6 + 0.4 * report["score"], 3)
-            except Exception:
-                pass
+        if report_obj:
+            report = report_obj.model_dump()
+            report.setdefault("confidence", round(0.6 + 0.4 * report["score"], 3))
+        else:
+            report = self._deterministic_report(profile)
 
         session_service.attach_artifact(session, "data_health", report)
         await self.emit(
@@ -96,24 +63,51 @@ class DataAlchemistAgent(BaseAgent):
             session.id,
             payload={"dataset_id": dataset_id, "report": report},
             parent_event_id=event.id,
-            confidence=report.get("confidence", 0.9),
+            confidence=report.get("confidence"),
         )
 
-        # Streamed verdict line — the UI renders a coloured banner.
         verdict = report["verdict"]
         await self.emit_message(
             session.id,
-            f"Data Health: **{verdict.replace('_', ' ').title()}** — {report['summary']}",
+            f"Data health: **{verdict.replace('_', ' ').title()}** - {report['summary']}",
             parent=event.id,
         )
-
-        # Hard issues surface as a Socratic ask.
         if report.get("asks"):
-            await self.ask(
-                session.id,
-                report["asks"][0],
-                impact="high",
-                parent=event.id,
-            )
+            await self.ask(session.id, report["asks"][0], impact="high", parent=event.id)
 
-    # ── helpers ──────────────────────────────────────────────────────────
+    def _deterministic_report(self, profile: dict) -> dict:
+        dup_pct = float((profile.get("duplicates") or {}).get("duplicate_pct") or 0.0)
+        worst_missing = 0.0
+        for col, m in (profile.get("missing", {}).get("per_column") or {}).items():
+            pct = float(m.get("missing_pct") or 0.0)
+            if pct > worst_missing:
+                worst_missing = pct
+        minority = float((profile.get("imbalance") or {}).get("minority_pct") or 100.0)
+
+        score = 1.0
+        notes: list[str] = []
+        asks: list[str] = []
+        if dup_pct >= 30:
+            score -= 0.4; notes.append(f"{dup_pct:.0f}% duplicate rows")
+            asks.append(f"I found {dup_pct:.0f}% duplicates. Should I dedupe?")
+        elif dup_pct >= 10:
+            score -= 0.15; notes.append(f"{dup_pct:.0f}% duplicates (advisory)")
+        if worst_missing >= 50:
+            score -= 0.3; notes.append(f"a column is {worst_missing:.0f}% missing")
+        if 0 < minority < 5:
+            score -= 0.2; notes.append(f"smallest class is only {minority:.1f}%")
+
+        score = max(0.0, min(1.0, score))
+        verdict = (
+            "healthy" if score >= 0.85
+            else "advisory" if score >= 0.7
+            else "needs_attention" if score >= 0.5
+            else "blocking"
+        )
+        return {
+            "verdict": verdict,
+            "score": round(score, 3),
+            "confidence": round(0.6 + 0.4 * score, 3),
+            "summary": ", ".join(notes) if notes else "clean dataset; no remediation suggested",
+            "asks": asks,
+        }
