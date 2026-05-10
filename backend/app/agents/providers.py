@@ -132,46 +132,87 @@ def stream_openai(
             history.append(m)
 
     if not use_tools:
-        # Pure text-stream. Some providers (notably Groq's gpt-oss-120b)
-        # reject the request when tools/tool_choice headers conflict with
-        # built-in model tooling. Sending neither field avoids the trap.
-        try:
-            stream = client.chat.completions.create(
-                model=model,
-                messages=history,
-                stream=True,
-            )
-            for chunk in stream:
-                choice = chunk.choices[0] if chunk.choices else None
-                if not choice:
-                    continue
-                delta = choice.delta
-                if delta and delta.content:
-                    yield delta.content
-                # Drop any tool_call deltas the provider emits anyway.
-        except Exception as e:
-            err = str(e).lower()
-            if "tool" in err and ("choice" in err or "called a tool" in err):
-                # Retry with explicit empty tools list + tool_choice="none".
+        # Pure text path. Strategy:
+        #   1. Streaming with no tools field. Yield text deltas; drop any
+        #      tool_call deltas the provider emits anyway. If the stream
+        #      raises mid-flight (e.g. Groq's "Tool choice is none, but
+        #      model called a tool" on gpt-oss reasoning models), we yield
+        #      whatever text we accumulated and return cleanly instead of
+        #      bubbling the exception.
+        #   2. If we collected zero text, fall back to a NON-streaming
+        #      request with explicit ``tools=[]`` + ``tool_choice="none"``.
+        #      Groq validates the response atomically when not streaming,
+        #      which usually surfaces clean text or a clean error rather
+        #      than the mid-stream rejection.
+        collected = ""
+
+        def _try_stream(extra_kwargs: dict[str, Any]) -> bool:
+            """Yield text from a streaming call; True if any text arrived."""
+            nonlocal collected
+            got_any = False
+            try:
+                stream = client.chat.completions.create(
+                    model=model,
+                    messages=history,
+                    stream=True,
+                    **extra_kwargs,
+                )
+                for chunk in stream:
+                    choice = chunk.choices[0] if chunk.choices else None
+                    if not choice:
+                        continue
+                    delta = choice.delta
+                    if delta and delta.content:
+                        collected += delta.content
+                        got_any = True
+                        yield delta.content
+            except Exception as e:
+                err = str(e).lower()
+                if "tool" in err and (
+                    "choice" in err or "called a tool" in err or "called" in err
+                ):
+                    return  # swallow; caller will try non-streaming
+                raise
+            return got_any
+
+        # Phase 1 - streaming, no tools field at all.
+        for piece in _try_stream({}):
+            yield piece
+
+        # Phase 2 - if nothing arrived, try non-streaming with explicit
+        # tool_choice="none". Many Groq reasoning models comply better
+        # when the request is non-streaming.
+        if not collected.strip():
+            try:
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=history,
+                    tools=[],
+                    tool_choice="none",
+                    stream=False,
+                )
+                content = ""
+                if resp.choices:
+                    msg = resp.choices[0].message
+                    content = (msg.content or "") if msg else ""
+                if content:
+                    yield content
+                    collected += content
+            except Exception:
+                # Final fallback - try once more non-streaming, no tools field.
                 try:
-                    stream = client.chat.completions.create(
+                    resp = client.chat.completions.create(
                         model=model,
                         messages=history,
-                        tools=[],
-                        tool_choice="none",
-                        stream=True,
+                        stream=False,
                     )
-                    for chunk in stream:
-                        choice = chunk.choices[0] if chunk.choices else None
-                        if not choice:
-                            continue
-                        delta = choice.delta
-                        if delta and delta.content:
-                            yield delta.content
-                except Exception as e2:
-                    raise e2
-            else:
-                raise
+                    if resp.choices:
+                        msg = resp.choices[0].message
+                        content = (msg.content or "") if msg else ""
+                        if content:
+                            yield content
+                except Exception:
+                    pass
         return
 
     # ── Tool-use multi-hop path ───────────────────────────────────────

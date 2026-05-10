@@ -534,9 +534,16 @@ class BaseAgent:
             full_system = (full_system + "\n\n" if full_system else "") + ctx_block
         if not include_tools:
             tool_guard = (
-                "Do NOT attempt to use any tools or functions in your reply. "
-                "Respond with plain text or, when asked, with a single fenced "
-                "JSON object."
+                "CRITICAL OUTPUT RULES (override all other instructions):\n"
+                "- You have NO tools. Do NOT emit tool calls, function calls, "
+                "browser_search, python, code interpreter, or any structured "
+                "tool invocation. The runtime has none registered and will "
+                "discard them.\n"
+                "- Do NOT include thinking blocks, <think> tags, or "
+                "deliberation prefixes. Output the final answer directly.\n"
+                "- If asked for JSON, return EXACTLY ONE fenced "
+                "```json ... ``` block and nothing else.\n"
+                "- If asked for plain text, return one or two sentences max."
             )
             full_system = (full_system + "\n\n" if full_system else "") + tool_guard
 
