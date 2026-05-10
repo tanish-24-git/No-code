@@ -66,6 +66,6 @@ def register_agents(bus: EventBus) -> list[BaseAgent]:
     ]
     for agent in agents:
         for kind in agent.triggers:
-            bus.on(kind, agent.handle)
+            bus.on(kind, agent.safe_handle)
         log.info("registered %s on %s", agent.name, ",".join(agent.triggers))
     return agents

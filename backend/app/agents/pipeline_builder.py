@@ -172,12 +172,12 @@ class PipelineBuilderAgent(BaseAgent):
     def _build_graph(self, dataset_id, profile, strategy):
         nodes = [
             {"id": "dataset", "type": "dataset", "position": {"x": 40, "y": 80}, "data": {"dataset_id": dataset_id}},
-            {"id": "preprocess", "type": "preprocess", "position": {"x": 360, "y": 80}, "data": {}},
+            {"id": "preprocess", "type": "preprocess", "position": {"x": 240, "y": 80}, "data": {}},
         ]
         edges = [{"id": "e1", "source": "dataset", "target": "preprocess"}]
 
         prev = "preprocess"
-        x = 700
+        x = 440
 
         # Insert balance node only when imbalance detected.
         imb = (profile.get("imbalance") or {})
@@ -186,20 +186,20 @@ class PipelineBuilderAgent(BaseAgent):
                           "data": {"label_field": imb["label_field"], "strategy": "upsample"}})
             edges.append({"id": f"e_{prev}_balance", "source": prev, "target": "balance"})
             prev = "balance"
-            x += 340
+            x += 200
 
         # Add a split node for train/val.
         nodes.append({"id": "split", "type": "split", "position": {"x": x, "y": 80}, "data": {"ratio": 0.9}})
         edges.append({"id": f"e_{prev}_split", "source": prev, "target": "split"})
-        x += 340
+        x += 200
 
         nodes.append({"id": "train", "type": "train", "position": {"x": x, "y": 80}, "data": {}})
         edges.append({"id": "e_split_train", "source": "split", "target": "train"})
-        x += 340
+        x += 200
 
         nodes.append({"id": "evaluate", "type": "evaluate", "position": {"x": x, "y": 80}, "data": {}})
         edges.append({"id": "e_train_eval", "source": "train", "target": "evaluate"})
-        x += 340
+        x += 200
 
         nodes.append({"id": "export", "type": "export", "position": {"x": x, "y": 80}, "data": {}})
         edges.append({"id": "e_eval_export", "source": "evaluate", "target": "export"})

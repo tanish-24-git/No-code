@@ -44,6 +44,12 @@ const CHAT_KINDS: ReadonlySet<EventKind> = new Set([
   'Error',
   'AgentThinking',
   'AgentPlanning',
+  'PhaseStarted',
+  'IntakeStarted',
+  'DatasetProfileStarted',
+  'TaskInferenceStarted',
+  'StrategyChosen',
+  'HardwareProfileStarted',
 ]);
 
 const STAGE_LABEL: Record<string, string> = {
@@ -85,6 +91,9 @@ export function AgentActivity({ sessionId }: Props) {
       'UserClarificationReceived',
       'PhasePlanProposed',
       'PhaseApproved',
+      'PhaseStarted',
+      'IntakeCompleted',
+      'DatasetProfileCompleted',
       'PipelineDraftCreated',
       'PipelineApprovalRequested',
       'PipelineApproved',
@@ -100,7 +109,38 @@ export function AgentActivity({ sessionId }: Props) {
   }, [events, mutateSession]);
 
   const transcript = useMemo(() => {
-    const raw = events.filter((e) => CHAT_KINDS.has(e.kind));
+    const unique = new Map<string, AgentEvent>();
+    
+    // Sort events by time first so we process them in order.
+    const sorted = [...events].sort((a, b) => 
+      new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    );
+
+    sorted.forEach((e) => {
+      // Logic for deduplication:
+      // 1. If it's a PhasePlanProposed, use the phase as the key.
+      //    We want the LATEST one for that phase.
+      // 2. Otherwise use the event.id.
+      let key = e.id;
+      if (e.kind === 'PhasePlanProposed') {
+        key = `phase-${e.payload.phase}`;
+        // For phases, we actually want to OVERWRITE with the latest one 
+        // in case the agent re-emitted it with updated steps/summary.
+        unique.set(key, e);
+        return;
+      }
+      
+      // For general events (messages, status), we keep the first occurrence 
+      // of an ID to avoid SSE-reconnect duplicates.
+      if (!unique.has(key)) {
+        unique.set(key, e);
+      }
+    });
+
+    const raw = Array.from(unique.values())
+      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+      .filter((e) => CHAT_KINDS.has(e.kind));
+
     const result: AgentEvent[] = [];
 
     for (const e of raw) {
@@ -294,6 +334,13 @@ function ChatRow(props: RowProps) {
       return <ThinkingRow event={event} />;
     case 'AgentPlanning':
       return <PlanningRow event={event} />;
+    case 'PhaseStarted':
+    case 'IntakeStarted':
+    case 'DatasetProfileStarted':
+    case 'TaskInferenceStarted':
+    case 'StrategyChosen':
+    case 'HardwareProfileStarted':
+      return <StatusRow event={event} />;
     default:
       return null;
   }
@@ -373,10 +420,22 @@ function PlanningRow({ event }: { event: AgentEvent }) {
   );
 }
 
+function StatusRow({ event }: { event: AgentEvent }) {
+  const text = (event.payload.title as string) || (event.payload.phase as string) || event.kind;
+  return (
+    <div className="flex justify-center py-1">
+      <div className="px-3 py-1 rounded-full bg-bg-2/50 border border-border/30 text-[10px] text-fg-3 font-medium uppercase tracking-wider flex items-center gap-2">
+        <div className="w-1 h-1 rounded-full bg-fg-3/40 animate-pulse" />
+        {text.replace(/([A-Z])/g, ' $1').trim()}
+      </div>
+    </div>
+  );
+}
+
 
 // ── Phase plan (chat-bubble with approve / comment under it) ──────────────
 
-function PhasePlanRow({ event, sessionId, onAction, busy, setBusy }: RowProps) {
+function PhasePlanRow({ event, session, sessionId, onAction, busy, setBusy }: RowProps) {
   const p = event.payload as {
     phase: string;
     title?: string;
@@ -387,18 +446,23 @@ function PhasePlanRow({ event, sessionId, onAction, busy, setBusy }: RowProps) {
   };
   const [comment, setComment] = useState('');
   const [showComment, setShowComment] = useState(false);
+  const [acted, setActed] = useState(false);
 
   const approve = async () => {
     setBusy(true);
+    setActed(true);
     try {
       await api(`/api/sessions/${sessionId}/phase/${p.phase}/approve`, { method: 'POST' });
       onAction();
+    } catch (e) {
+      setActed(false);
     } finally { setBusy(false); }
   };
 
   const submitComment = async () => {
     if (!comment.trim()) return;
     setBusy(true);
+    setActed(true);
     try {
       await api(`/api/sessions/${sessionId}/phase/${p.phase}/comment`, {
         method: 'POST',
@@ -407,6 +471,8 @@ function PhasePlanRow({ event, sessionId, onAction, busy, setBusy }: RowProps) {
       setComment('');
       setShowComment(false);
       onAction();
+    } catch (e) {
+      setActed(false);
     } finally { setBusy(false); }
   };
 
@@ -426,7 +492,7 @@ function PhasePlanRow({ event, sessionId, onAction, busy, setBusy }: RowProps) {
             )}
           </div>
         </Bubble>
-        {p.requires_approval && (
+        {p.requires_approval && !acted && session?.state === 'awaiting_approval' && (
           <div className="flex items-center gap-2 pl-1">
             <button
               disabled={busy}
@@ -483,18 +549,25 @@ function ClarificationRow({ event, session, sessionId, onAction, busy, setBusy }
   const [single, setSingle] = useState<string>('');
   const [multi, setMulti] = useState<string[]>([]);
   const [text, setText] = useState<string>('');
+  const [acted, setActed] = useState(false);
   const answered = session?.clarifications?.some((c) => c.question_id === q.question_id);
 
   const submit = async () => {
     setBusy(true);
+    setActed(true);
     try {
       const value = q.kind === 'multi_choice' ? multi : q.kind === 'text' ? text.trim() : single;
-      if (q.kind === 'multi_choice' ? multi.length === 0 : !value) return;
+      if (q.kind === 'multi_choice' ? multi.length === 0 : !value) {
+        setActed(false);
+        return;
+      }
       await api(`/api/sessions/${sessionId}/clarifications/${q.question_id}`, {
         method: 'POST',
         body: JSON.stringify({ value }),
       });
       onAction();
+    } catch (e) {
+      setActed(false);
     } finally {
       setBusy(false);
     }
@@ -509,7 +582,7 @@ function ClarificationRow({ event, session, sessionId, onAction, busy, setBusy }
             {q.context && <div className="text-[11px] text-fg-2">{q.context}</div>}
           </div>
         </Bubble>
-        {!answered && (
+        {!answered && !acted && (
           <div className="space-y-2 pl-1">
             {q.kind === 'single_choice' && (
               <div className="flex flex-wrap gap-1.5">
@@ -597,18 +670,22 @@ function ClarificationRow({ event, session, sessionId, onAction, busy, setBusy }
 // ── Pipeline approval (chat bubble + approve / reject) ────────────────────
 
 function ApprovalRow({ event, session, sessionId, onAction, busy, setBusy }: RowProps) {
-  const decided = session?.state !== 'awaiting_approval';
+  const [acted, setActed] = useState(false);
+  const decided = session?.state !== 'awaiting_approval' || acted;
   const summary = (event.payload.summary as { summary?: string }) ?? {};
   const minutes = Number(event.payload.estimated_minutes ?? 0);
 
   const decide = async (approve: boolean) => {
     setBusy(true);
+    setActed(true);
     try {
       await api(`/api/sessions/${sessionId}/approve`, {
         method: 'POST',
         body: JSON.stringify({ approve, reason: approve ? 'user approved' : 'user rejected' }),
       });
       onAction();
+    } catch (e) {
+      setActed(false);
     } finally { setBusy(false); }
   };
 
@@ -622,7 +699,7 @@ function ApprovalRow({ event, session, sessionId, onAction, busy, setBusy }: Row
             {minutes > 0 && <div className="text-[11px] text-fg-3">~{minutes.toFixed(0)} minutes estimated</div>}
           </div>
         </Bubble>
-        {!decided && (
+        {!decided && !acted && (
           <div className="flex items-center gap-2 pl-1">
             <button
               disabled={busy}
@@ -665,15 +742,20 @@ function ExportRow({ event, sessionId, onAction, busy, setBusy, session }: RowPr
   const [choice, setChoice] = useState<'local' | 'hf' | 'both'>('local');
   const [repoId, setRepoId] = useState<string>('');
 
+  const [acted, setActed] = useState(false);
+
   const submit = async () => {
     if ((choice === 'hf' || choice === 'both') && !repoId.trim()) return;
     setBusy(true);
+    setActed(true);
     try {
       await api(`/api/sessions/${sessionId}/export`, {
         method: 'POST',
         body: JSON.stringify({ choice, hf_repo_id: repoId.trim() || undefined }),
       });
       onAction();
+    } catch (e) {
+      setActed(false);
     } finally { setBusy(false); }
   };
 
@@ -681,7 +763,7 @@ function ExportRow({ event, sessionId, onAction, busy, setBusy, session }: RowPr
     <div className="flex justify-start">
       <div className="max-w-[88%] space-y-2">
         <Bubble side="left" text="Where should the trained model go?" />
-        {!decided && (
+        {!decided && !acted && (
           <div className="space-y-2 pl-1">
             <div className="flex gap-1.5">
               {(['local', 'hf', 'both'] as const).map((c) => (

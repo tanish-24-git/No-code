@@ -57,9 +57,26 @@ class BaseAgent:
 
     def __init__(self, bus: EventBus) -> None:
         self.bus = bus
+        # Tracks session IDs with an active handle() invocation.
+        # Prevents duplicate concurrent execution when PhaseApproved both
+        # resolves a wait_for_approval future AND re-triggers handle().
+        self._active_sessions: set[str] = set()
 
     async def handle(self, event: AgentEvent) -> None:
         raise NotImplementedError
+
+    async def safe_handle(self, event: AgentEvent) -> None:
+        """Wrapper that prevents reentrant handle() for the same session."""
+        sid = event.session_id
+        if sid in self._active_sessions:
+            log.debug("%s: skipping reentrant handle for session %s (event=%s)",
+                      self.name, sid, event.kind)
+            return
+        self._active_sessions.add(sid)
+        try:
+            await self.handle(event)
+        finally:
+            self._active_sessions.discard(sid)
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -220,7 +237,22 @@ class BaseAgent:
     async def wait_for_approval(self, session_id: str, phase: str) -> Optional[str]:
         """Pause execution until the user clicks Approve or submits a Comment.
         Returns the comment text if one was provided, or None if approved.
+
+        Automatically transitions the session to AWAITING_APPROVAL so the
+        frontend displays the approve/comment buttons, and restores the
+        previous state once the user responds.
         """
+        from app.api.schemas.session import FSMState
+
+        # Transition to AWAITING_APPROVAL so the FE renders interaction buttons.
+        session = self.get_session(session_id)
+        prev_state = session.state if session else None
+        if session and session.state != FSMState.AWAITING_APPROVAL:
+            session_service.advance_state(
+                session, FSMState.AWAITING_APPROVAL,
+                reason=f"awaiting {phase} approval",
+            )
+
         loop = asyncio.get_running_loop()
         future = loop.create_future()
 
@@ -238,10 +270,22 @@ class BaseAgent:
         self.bus.on("PhaseCommented", _on_commented)
 
         try:
-            return await future
+            result = await future
         finally:
             self.bus.off("PhaseApproved", _on_approved)
             self.bus.off("PhaseCommented", _on_commented)
+
+        # Restore the previous state (or default to PROFILING) so the
+        # pipeline can continue after the user responds.
+        session = self.get_session(session_id)
+        if session and session.state == FSMState.AWAITING_APPROVAL:
+            restore_to = prev_state if prev_state and prev_state != FSMState.AWAITING_APPROVAL else FSMState.PROFILING
+            session_service.advance_state(
+                session, restore_to,
+                reason=f"{phase} {'feedback received' if result else 'approved'}",
+            )
+
+        return result
 
     # ── Streaming helpers (blackboard-mirrored) ────────────────────────────
 

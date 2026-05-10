@@ -62,7 +62,7 @@ class ModelSelectionAgent(BaseAgent):
 
         await self.materialize_node(
             session_id,
-            {"id": "model", "type": "config", "position": {"x": 360, "y": 240}, "data": {"label": "base model"}},
+            {"id": "model", "type": "config", "position": {"x": 240, "y": 200}, "data": {"label": "base model"}},
             parent=event.id,
         )
         await self.materialize_edge(

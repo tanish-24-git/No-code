@@ -12,46 +12,58 @@ class DatasetIntakeAgent(BaseAgent):
     name = "DatasetIntakeAgent"
     role = "First-pass dataset inspection"
     allowed_tools = ("dataset.inspect", "dataset.read_sample", "dataset.summarize_fields", "audit.write")
-    triggers = ("DatasetUploaded",)
-
+    triggers = ("DatasetUploaded", "PhaseApproved")
+    
     async def handle(self, event: AgentEvent) -> None:
         session_id = event.session_id
-        dataset_id = event.payload.get("dataset_id")
-        if not dataset_id:
-            await self.emit_error(session_id, "DatasetUploaded missing dataset_id")
+        session = self.get_session(session_id)
+        if not session:
             return
 
-        session = self.get_session(session_id)
-        if session and session.state == FSMState.INIT:
-            session_service.advance_state(session, FSMState.PROFILING, reason="intake started")
+        # Guard: ignore PhaseApproved events that aren't for us.
+        if event.kind == "PhaseApproved" and event.payload.get("phase") != "intake":
+            return
 
-        # Phase narration + canvas pop.
-        await self.announce(
-            session_id,
-            phase="intake",
-            title="Reading your dataset",
-            summary="Inspecting metadata, sampling rows, and bucketing columns by purpose.",
-            steps=[
-                "Read row count and column types",
-                "Sample 3 rows for sanity-check",
-                "Classify columns: instruction-like / input-like / output-like / label-like",
-            ],
-            outputs=["dataset_facts artifact"],
-            requires_approval=True,
-            parent=event.id,
-        )
+        dataset_id = event.payload.get("dataset_id") or session.dataset_id
+        if not dataset_id:
+            await self.emit_error(session_id, "Missing dataset_id")
+            return
 
-        await self.materialize_node(
-            session_id,
-            {"id": "dataset", "type": "dataset", "position": {"x": 40, "y": 80},
-             "data": {"label": "dataset", "dataset_id": dataset_id}},
-            parent=event.id,
-        )
+        # If we are resuming from a restart after approval
+        resuming = event.kind == "PhaseApproved" and event.payload.get("phase") == "intake"
+        
+        if not resuming:
+            if session.state == FSMState.INIT:
+                session_service.advance_state(session, FSMState.PROFILING, reason="intake started")
 
-        comment = await self.wait_for_approval(session_id, "intake")
-        if comment:
-            await self.think(session_id, f"User intake feedback: {comment}")
+            # Phase narration + canvas pop.
+            await self.announce(
+                session_id,
+                phase="intake",
+                title="Reading your dataset",
+                summary="Inspecting metadata, sampling rows, and bucketing columns by purpose.",
+                steps=[
+                    "Read row count and column types",
+                    "Sample 3 rows for sanity-check",
+                    "Classify columns: instruction-like / input-like / output-like / label-like",
+                ],
+                outputs=["dataset_facts artifact"],
+                requires_approval=True,
+                parent=event.id,
+            )
 
+            await self.materialize_node(
+                session_id,
+                {"id": "dataset", "type": "dataset", "position": {"x": 40, "y": 80},
+                 "data": {"label": "dataset", "dataset_id": dataset_id}},
+                parent=event.id,
+            )
+
+            comment = await self.wait_for_approval(session_id, "intake")
+            if comment:
+                await self.think(session_id, f"User intake feedback: {comment}")
+
+        # --- Start the work (either after approval or on resume) ---
         await self.emit("IntakeStarted", session_id, payload={"dataset_id": dataset_id})
 
         info = await self.call_tool("dataset.inspect", {"dataset_id": dataset_id}, session_id)

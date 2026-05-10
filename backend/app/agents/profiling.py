@@ -3,6 +3,7 @@ class imbalance. Produces a numeric profile that downstream agents read."""
 from __future__ import annotations
 
 from app.agents.base import BaseAgent
+from app.api.schemas.session import FSMState
 from app.events.types import AgentEvent
 from app.services import session_service
 
@@ -17,45 +18,56 @@ class DatasetProfilingAgent(BaseAgent):
         "dataset.detect_imbalance",
         "audit.write",
     )
-    triggers = ("IntakeCompleted",)
+    triggers = ("IntakeCompleted", "PhaseApproved")
 
     async def handle(self, event: AgentEvent) -> None:
         session_id = event.session_id
-        dataset_id = event.payload.get("dataset_id")
+        session = self.get_session(session_id)
+        if not session:
+            return
+
+        dataset_id = event.payload.get("dataset_id") or session.dataset_id
         if not dataset_id:
             return
 
-        await self.announce(
-            session_id,
-            phase="profile",
-            title="Profiling the dataset",
-            summary="Computing token-length distribution, duplicates, missing values, and class balance.",
-            steps=[
-                "Whitespace token-length p50/p95/max",
-                "Exact-row hash dedup",
-                "Per-column missing-rate",
-                "Low-cardinality column class balance",
-            ],
-            outputs=["profile artifact (tokens, duplicates, missing, imbalance)"],
-            requires_approval=True,
-            parent=event.id,
-        )
+        # Guard: ignore PhaseApproved events that aren't for us.
+        if event.kind == "PhaseApproved" and event.payload.get("phase") != "profile":
+            return
 
-        await self.materialize_node(
-            session_id,
-            {"id": "preprocess", "type": "preprocess", "position": {"x": 360, "y": 80},
-             "data": {"label": "profile + clean"}},
-            parent=event.id,
-        )
-        await self.materialize_edge(
-            session_id,
-            {"id": "e-dataset-preprocess", "source": "dataset", "target": "preprocess", "animated": True},
-            parent=event.id,
-        )
+        resuming = event.kind == "PhaseApproved" and event.payload.get("phase") == "profile"
 
-        comment = await self.wait_for_approval(session_id, "profile")
-        if comment:
-            await self.think(session_id, f"User profiling feedback: {comment}")
+        if not resuming:
+            await self.announce(
+                session_id,
+                phase="profile",
+                title="Profiling the dataset",
+                summary="Computing token-length distribution, duplicates, missing values, and class balance.",
+                steps=[
+                    "Whitespace token-length p50/p95/max",
+                    "Exact-row hash dedup",
+                    "Per-column missing-rate",
+                    "Low-cardinality column class balance",
+                ],
+                outputs=["profile artifact (tokens, duplicates, missing, imbalance)"],
+                requires_approval=True,
+                parent=event.id,
+            )
+
+            await self.materialize_node(
+                session_id,
+                {"id": "preprocess", "type": "preprocess", "position": {"x": 240, "y": 80},
+                 "data": {"label": "profile + clean"}},
+                parent=event.id,
+            )
+            await self.materialize_edge(
+                session_id,
+                {"id": "e-dataset-preprocess", "source": "dataset", "target": "preprocess", "animated": True},
+                parent=event.id,
+            )
+
+            comment = await self.wait_for_approval(session_id, "profile")
+            if comment:
+                await self.think(session_id, f"User profiling feedback: {comment}")
 
         await self.emit("DatasetProfileStarted", session_id, payload={"dataset_id": dataset_id})
 
