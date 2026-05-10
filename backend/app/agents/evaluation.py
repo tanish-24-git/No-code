@@ -34,7 +34,7 @@ class EvaluationAgent(BaseAgent):
         )
         await self.materialize_node(
             session_id,
-            {"id": "evaluate", "type": "evaluate", "position": {"x": 1380, "y": 80},
+            {"id": "evaluate", "type": "evaluate", "position": {"x": 840, "y": 80},
              "data": {"label": "evaluate"}},
             parent=event.id,
         )

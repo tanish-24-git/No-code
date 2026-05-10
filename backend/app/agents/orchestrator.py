@@ -15,7 +15,9 @@ import json
 import re
 
 from app.agents.base import BaseAgent
+from app.api.schemas.session import FSMState
 from app.events.types import AgentEvent
+from app.services import session_service
 
 
 _OPENING_PLAN = [
@@ -42,13 +44,21 @@ class OrchestratorAgent(BaseAgent):
     name = "OrchestratorAgent"
     role = "Voice of the studio. Greets and broadcasts the master plan."
     allowed_tools = ()
-    triggers = ("SessionStarted", "AuditOverride")
+    triggers = ("SessionStarted", "AuditOverride", "PhaseApproved")
 
     async def handle(self, event: AgentEvent) -> None:
         if event.kind == "SessionStarted":
             await self._open(event)
         elif event.kind == "AuditOverride":
             await self._audit_override(event)
+        elif event.kind == "PhaseApproved":
+            if event.payload.get("phase") == "plan":
+                await self.complete(
+                    event.session_id,
+                    phase="plan",
+                    summary="Master plan approved. Starting the cascade.",
+                    parent=event.id,
+                )
 
     async def _open(self, event: AgentEvent) -> None:
         session_id = event.session_id
@@ -104,22 +114,16 @@ class OrchestratorAgent(BaseAgent):
             session_id,
             phase="plan",
             title="Master plan",
-            summary="I have drafted a custom execution plan for this dataset. Please review and approve.",
+            summary="I have drafted a custom execution plan for this dataset. The pipeline will now begin execution.",
             steps=steps,
-            requires_approval=True,
+            requires_approval=False,
             parent=event.id,
         )
-
-        # Wait for user to approve the master plan.
-        comment = await self.wait_for_approval(session_id, "plan")
-        if comment:
-            await self.think(session_id, f"User added a note to the master plan: {comment}")
-            # In a more advanced version, we would re-generate the plan here.
 
         await self.complete(
             session_id,
             phase="plan",
-            summary="Master plan approved. Starting the cascade.",
+            summary="Master plan broadcasted. Starting the cascade.",
             parent=event.id,
         )
 

@@ -44,7 +44,7 @@ export default function TestPage() {
   const active = trained.find((m) => m.id === activeId) ?? null;
 
   return (
-    <div className="h-[calc(100vh-52px)] bg-black flex overflow-hidden">
+    <div className="h-[calc(100vh-112px)] bg-black flex overflow-hidden">
       <aside className="w-[280px] border-r border-white/5 bg-[#050505] flex flex-col">
         <div className="p-4 border-b border-white/5">
           <h2 className="text-[10px] uppercase tracking-[0.3em] font-black text-white/60">
@@ -54,7 +54,12 @@ export default function TestPage() {
             Pick one and send it a prompt.
           </p>
         </div>
-        <div className="flex-1 overflow-y-auto p-2 space-y-1">
+        <div 
+          className="flex-1 overflow-y-auto overscroll-y-contain p-2 space-y-1" 
+          onWheel={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
+          onTouchMove={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
+          data-lenis-prevent="true"
+        >
           {trained.length === 0 && (
             <div className="px-4 py-8 text-center space-y-2">
               <Box className="w-5 h-5 mx-auto text-white/20" />
@@ -310,7 +315,13 @@ function Chat({ model, disabled }: { model: ModelRecord; disabled: boolean }) {
       )}
 
       {/* Conversation */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-5 space-y-3">
+      <div 
+        ref={scrollRef} 
+        className="flex-1 overflow-y-auto overscroll-y-contain px-5 py-5 space-y-3" 
+        onWheel={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
+        onTouchMove={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
+        data-lenis-prevent="true"
+      >
         {turns.length === 0 && <Suggestions onPick={(s) => setDraft(s)} />}
         {turns.map((t, i) => (
           <Bubble key={i} role={t.role} text={t.content} streaming={streaming && i === turns.length - 1 && t.role === 'assistant'} />

@@ -29,7 +29,7 @@ class TrainingStrategyAgent(BaseAgent):
 
         await self.materialize_node(
             session_id,
-            {"id": "strategy", "type": "config", "position": {"x": 640, "y": 80}, "data": {"label": "strategy"}},
+            {"id": "strategy", "type": "config", "position": {"x": 440, "y": 80}, "data": {"label": "strategy"}},
             parent=event.id,
         )
         await self.materialize_edge(
