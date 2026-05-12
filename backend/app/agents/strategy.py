@@ -53,39 +53,29 @@ class TrainingStrategyAgent(BaseAgent):
             parent=event.id,
         )
 
-        # 1. Try the LLM with strict schema. Shared context already
-        # injects user directives so "use 5 epochs" is honored.
+        # The agent now relies entirely on its reasoning for strategy selection.
+        # Hardcoded fallbacks and heuristic tools have been decommissioned.
         llm_proposal = await self.call_llm_typed(
             session_id,
             (
                 f"Hardware: {hw}\nProfile: {profile}\nTask: {task}\n"
                 f"Model: {chosen_model.get('repo_id')} ({chosen_model.get('params_b')}B)\n"
                 f"Priority: {priority}\n\n"
-                "Choose a fine-tuning strategy. Honor any user directives "
-                "above. Use bf16 on CUDA when possible, fp16 on MPS, "
-                "fp32 only on CPU. For datasets < 5k rows prefer 3-5 "
-                "epochs, > 50k rows 1 epoch."
+                "Design the optimal fine-tuning strategy (method, precision, epochs, batch, lr, etc.). "
+                "Base your decision on the model architecture, VRAM constraints, and dataset profile. "
+                "Output ONLY the StrategyChoice JSON."
             ),
             StrategyChoice,
-            system="You are a SOTA MLOps architect. Output only valid JSON.",
+            system="You are an autonomous MLOps architect. Design the best job for this model specimen.",
             stream_thoughts=False,
             parent=event.id,
         )
 
-        if llm_proposal is not None:
+        if llm_proposal:
             strategy = llm_proposal.model_dump()
         else:
-            # Deterministic fallback - computed, not hardcoded.
-            tool_out = await self.call_tool(
-                "strategy.choose",
-                {"model": chosen_model, "hardware": hw, "profile": profile,
-                 "task": task, "priority": priority},
-                session_id,
-            )
-            if "error" in tool_out:
-                await self.emit_error(session_id, tool_out["error"])
-                return
-            strategy = tool_out
+            await self.emit_error(session_id, "AI failed to design a strategy for this model.")
+            return
 
         # Apply directive overrides (LLM might have ignored them - we
         # belt-and-suspenders here).

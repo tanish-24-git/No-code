@@ -43,7 +43,7 @@ class Blackboard:
         nodes      — UI scaffolding the GarnishingAgent has materialized
     """
 
-    SECTIONS = ("thoughts", "plans", "questions", "critiques", "decisions", "nodes")
+    SECTIONS = ("thoughts", "plans", "questions", "critiques", "decisions", "nodes", "directives")
 
     def __init__(self, root: Optional[Path] = None) -> None:
         self.root = root or (settings.data_dir / "blackboards")

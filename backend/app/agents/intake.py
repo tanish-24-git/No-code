@@ -103,9 +103,12 @@ class DatasetIntakeAgent(BaseAgent):
         await self.emit_message(
             session_id,
             (
-                f"Got your dataset **{info.get('name')}** - {info.get('row_count')} rows, "
-                f"{len(cols)} columns ({col_preview}).\n\n"
-                f"**Engineering outlook:** {outcomes_msg}"
+                f"I've analyzed your dataset **{info.get('name')}**. "
+                f"It contains **{info.get('row_count')}** rows across **{len(cols)}** columns: {col_preview}.\n\n"
+                f"Based on the structure, I've identified this as a potential **{outcomes_msg}** project. "
+                "However, I want to tailor this session to your specific needs.\n\n"
+                "**What is your primary goal for this training run?** "
+                "(e.g., 'I want a chat model for customer support', 'I need a medical Q&A assistant', 'Instruction-tune for coding')."
             ),
             parent=event.id,
         )
@@ -113,7 +116,7 @@ class DatasetIntakeAgent(BaseAgent):
         await self.complete(
             session_id,
             phase="intake",
-            summary=f"{info.get('row_count', 0)} rows, {len(cols)} columns",
+            summary=f"Identified {info.get('row_count', 0)} rows; awaiting user goal.",
             artifacts={"dataset_facts_keys": list((buckets.get("field_buckets") or {}).keys())},
             parent=event.id,
         )

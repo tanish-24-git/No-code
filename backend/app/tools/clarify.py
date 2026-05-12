@@ -1,39 +1,12 @@
-"""Clarification tools. The agent never invents free-form questions;
-it picks them from the catalog and parses replies via these tools."""
+"""Clarification tools. The agent now designs free-form questions;
+replies are parsed and validated via these tools."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
 
 from app.api.schemas.session import ClarificationAnswer, ClarificationQuestion
-from app.orchestration.catalog import build_question, get_question
 from app.tools.registry import ToolContext, tool
-
-
-@tool(
-    name="clarify.ask",
-    description="Build a structured clarification question of a known kind from the catalog.",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "question_id": {"type": "string"},
-            "options": {"type": "array", "items": {"type": "string"}},
-            "context": {"type": "string"},
-        },
-        "required": ["question_id"],
-    },
-)
-async def clarify_ask(args: dict[str, Any], _ctx: ToolContext) -> dict[str, Any]:
-    qid = args["question_id"]
-    base = get_question(qid)
-    if not base:
-        return {"error": f"unknown question id: {qid}"}
-    q: ClarificationQuestion = build_question(
-        qid,
-        options=args.get("options"),
-        context=args.get("context"),
-    )
-    return q.model_dump(mode="json")
 
 
 @tool(

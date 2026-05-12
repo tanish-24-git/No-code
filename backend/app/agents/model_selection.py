@@ -56,18 +56,22 @@ class ModelSelectionAgent(BaseAgent):
             parent=event.id,
         )
 
-        # 1. Read user directives (e.g. "use Llama") set on any prior phase.
+        # 1. Read user directives (e.g. "use Llama") and the overall session goal.
         hints = directives_service.model_hints(session_id)
         family = hints.get("family")
         size_b = hints.get("size_b")
         repo_id_hint = hints.get("repo_id")
+        
+        # Pull the global goal as a fallback query
+        all_directives = directives_service.read_for_scope(session_id, "global")
+        goal = next((d.text for d in all_directives if d.scope == "global"), None)
 
         await self.think(
             session_id,
             (
                 "Searching HuggingFace Hub. "
-                + (f"Honoring user hint: family={family}, size~{size_b}B. "
-                   if (family or size_b) else "No specific family hint - using broad search. ")
+                + (f"Honoring user hint: {family or repo_id_hint}. " if (family or repo_id_hint) else "")
+                + (f"Querying for: '{goal}'. " if goal else "Broad search. ")
             ),
             parent=event.id,
         )
@@ -78,13 +82,14 @@ class ModelSelectionAgent(BaseAgent):
             "model.search_hf",
             {
                 "task": chosen_task,
+                "query": goal if not family else None,
                 "family_hint": family,
                 "size_hint_b": size_b,
                 "hardware": hw,
                 "precision": (session.artifacts.get("strategy") or {}).get("precision", "bf16"),
                 "method": (session.artifacts.get("strategy") or {}).get("method", "lora"),
                 "instruct_only": True,
-                "top_n": 12,
+                "top_n": 15,
             },
             session_id,
         )
@@ -123,6 +128,17 @@ class ModelSelectionAgent(BaseAgent):
             match = next((c for c in candidates if c["repo_id"].lower() == repo_id_hint.lower()), None)
             if match:
                 candidates = [match] + [c for c in candidates if c is not match]
+        elif family or size_b:
+            # Boost candidates matching family or size hints so user intent
+            # isn't buried by the raw ranker's CPU-efficiency bias.
+            def _hint_score(c):
+                s = 0.0
+                if family and family in c["repo_id"].lower():
+                    s += 2.0
+                if size_b and abs(c["params_b"] - float(size_b)) < 0.1:
+                    s += 1.0
+                return s
+            candidates.sort(key=lambda c: (c["score"] + _hint_score(c)), reverse=True)
 
         candidate_list_str = "\n".join(
             f"{i + 1}. {c['label']} ({c['repo_id']}) - {c['params_b']}B"

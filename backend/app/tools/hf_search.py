@@ -13,9 +13,9 @@ agent narrows the search by:
 
 Parameter counts come from the HuggingFace ``model_info`` endpoint when
 available (``safetensors.total`` field) and only fall back to a regex on
-the repo id when the API does not provide them. This avoids the bug
-where ``Qwen2.5-Coder-32B-Instruct`` was mis-sized as 2.5B from a regex
-match against ``Qwen2.5``.
+the repo id when the API does not provide them. This avoids mis-sizing
+models where the version number (e.g. '3.2') might be mistaken for the 
+parameter count.
 """
 from __future__ import annotations
 
@@ -249,8 +249,8 @@ async def model_search_hf(args: dict[str, Any], _ctx: ToolContext) -> dict[str, 
     except Exception as e:
         error = f"{type(e).__name__}: {str(e)[:200]}"
 
-    if not candidates:
-        candidates = _from_catalog(budget, family_hint, top_n)
+    if not candidates and not error:
+        error = "No models found on HuggingFace Hub matching the criteria."
 
     if size_hint_b:
         # Re-rank candidates to put the closest size on top.
@@ -272,28 +272,3 @@ async def model_search_hf(args: dict[str, Any], _ctx: ToolContext) -> dict[str, 
 
 def _label_from_id(repo_id: str) -> str:
     return repo_id.split("/")[-1]
-
-
-def _from_catalog(budget: float, family_hint: Optional[str], top_n: int) -> list[dict[str, Any]]:
-    """Curated fallback list. Mirrors the HfApi result shape."""
-    from app.tools.model import CATALOG
-
-    out: list[dict[str, Any]] = []
-    for spec in CATALOG:
-        if spec.params_b > budget * 1.05:
-            continue
-        if family_hint and family_hint not in spec.repo_id.lower():
-            continue
-        out.append({
-            "repo_id": spec.repo_id,
-            "label": spec.label,
-            "params_b": spec.params_b,
-            "downloads": 0,
-            "likes": 0,
-            "tags": [spec.family],
-            "source": "fallback_catalog",
-            "max_pos": spec.max_pos,
-        })
-        if len(out) >= top_n:
-            break
-    return out

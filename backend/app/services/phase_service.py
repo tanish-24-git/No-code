@@ -24,6 +24,7 @@ from app.events.types import AgentEvent
 
 # Canonical phase names. Keep in sync with the FE node map.
 PHASES = (
+    "master_plan",    # Overall session intent
     "intake",         # Dataset metadata read
     "profile",        # Token / duplicate / missing / imbalance scan
     "restructure",    # Raw document transformation

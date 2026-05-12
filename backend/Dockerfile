@@ -21,7 +21,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install --upgrade pip && pip install --default-timeout=1000 -r requirements.txt
+RUN pip install --upgrade pip && \
+    pip install --default-timeout=1000 --retries 10 -r requirements.txt
 
 COPY app ./app
 
