@@ -375,11 +375,18 @@ async def ask_user(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         return {"error": "session not found"}
     session_service.set_pending_question(session, q)
 
+    # Emission shape must be flat - the frontend ClarificationRow
+    # (AgentActivity.tsx:458-498) destructures payload.question_id /
+    # .question / .kind / .options directly, matching the legacy
+    # ClarificationAgent shape. Wrapping in {"question": {...}} crashes
+    # React with error #31 when the question card renders.
+    flat_payload = q.model_dump(mode="json")
+    flat_payload["impact"] = impact
     helper = _helper(ctx)
     await helper.emit(
         "UserClarificationRequested",
         ctx.session_id,
-        payload={"question": q.model_dump(mode="json"), "impact": impact},
+        payload=flat_payload,
     )
 
     loop = asyncio.get_running_loop()
@@ -388,11 +395,14 @@ async def ask_user(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     async def _on_received(ev: AgentEvent) -> None:
         if ev.session_id != ctx.session_id:
             return
-        payload = ev.payload or {}
-        if payload.get("question_id") != qid:
+        # The reply endpoint at /api/sessions/{id}/clarifications/{qid}
+        # publishes payload={"answer": ClarificationAnswer.model_dump()};
+        # unwrap before matching.
+        answer = (ev.payload or {}).get("answer") or {}
+        if answer.get("question_id") != qid:
             return
         if not future.done():
-            future.set_result(payload.get("value"))
+            future.set_result(answer.get("value"))
 
     ctx.bus.on("UserClarificationReceived", _on_received)
     try:
