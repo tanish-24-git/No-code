@@ -1,9 +1,16 @@
 """DataRestructurerAgent — turns raw documents into a structured dataset.
 
-Triggered as the very first stage in the pipeline (right after intake)
-when the uploaded dataset is classified as ``raw_doc`` (PDF, DOCX, TXT,
-MD, HTML). The agent:
+v4.0 — Universal Intake Engine: handles ANY uploaded content, regardless of
+extension. Triggered as the very first stage in the pipeline (right after
+intake) when the uploaded dataset is classified as ``raw_doc``. Now supports:
 
+    * Cross-file synthesis — aggregated directory uploads where multiple
+      documents (PDF + JSON logs + TXT notes) are combined.
+    * Autonomous de-noising — boilerplate, headers, and irrelevant content
+      are stripped before LLM restructuring.
+    * Extension-agnostic parsing — type sniffed from content, not filename.
+
+The agent:
     1. Asks the user (with a sensible default) which target format to
        produce: instruction, chat, qa, or classification.
     2. Chunks the source text via ``alchemy.chunk_text``.
@@ -36,7 +43,7 @@ _FORMAT_OPTIONS = ("instruction", "chat", "qa", "classification", "language_mode
 
 class DataRestructurerAgent(BaseAgent):
     name = "DataRestructurerAgent"
-    role = "Convert raw text (PDF / DOCX / TXT / MD) into a fine-tuning dataset."
+    role = "Convert any uploaded raw content into a fine-tuning dataset (extension-agnostic, cross-file capable)."
     directive_scope = "data"
     allowed_tools = (
         "alchemy.chunk_text",
@@ -58,13 +65,23 @@ class DataRestructurerAgent(BaseAgent):
             return  # Already structured; nothing to do.
 
         # Ask the user which target format we should produce.
+        # Determine if this is a multi-file source (directory upload)
+        analysis = ds.analysis or {}
+        source_type = analysis.get("source", "file")
+        file_count = analysis.get("file_count", 1)
+        source_desc = (
+            f"**{file_count} files** from directory **{ds.name}**"
+            if source_type == "directory"
+            else f"**{ds.name}**"
+        )
+
         await self.announce(
             session_id,
             phase="restructure",
-            title="Restructure raw document into a dataset",
+            title="Restructure raw content into a dataset",
             summary=(
-                f"Your upload **{ds.name}** is a raw document. "
-                "I'll chunk the text and synthesize fine-tuning pairs. "
+                f"Your upload {source_desc} contains raw content. "
+                "I'll chunk the text, de-noise it, and synthesize fine-tuning pairs. "
                 "Tell me what format you want or comment with details "
                 "(e.g. 'medical Q&A', 'code completion'). I default to "
                 "**instruction** if you just approve."

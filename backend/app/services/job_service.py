@@ -366,6 +366,10 @@ def _handler_train(job: JobRecord, config: PipelineConfig, node: dict[str, Any],
             lora_rank=int(config.lora_rank),
             on_step=_on_step,
             is_stopped=lambda: stop.is_set(),
+            # v4.0: efficiency-first kernel
+            use_unsloth=getattr(config, "use_unsloth", False),
+            optimizer=getattr(config, "optimizer", "adamw") or "adamw",
+            use_liger=getattr(config, "use_liger", False),
         )
     except TrainingNotAvailable as e:
         log(f"[ERROR] training stack not available: {e}")

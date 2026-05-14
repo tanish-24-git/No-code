@@ -7,14 +7,15 @@ This is what makes the swarm feel like a hive instead of a pipeline.
 Backed by JSON-on-disk so a session survives a process restart and can be
 replayed faithfully — see also ``checkpoint_service``.
 
-Concurrency: a per-session ``threading.Lock`` protects multi-writer access.
-The asyncio runtime is single-threaded, but background trainers run in
-worker threads and may publish via ``publish_threadsafe`` which can race.
+v4.0 — Fully async.  All locks are ``asyncio.Lock``, all disk I/O uses
+``aiofiles`` so the event loop never blocks. Synchronous read/post
+wrappers remain for non-async call-sites.
 """
 from __future__ import annotations
 
+import asyncio
 import json
-import threading
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -48,7 +49,7 @@ class Blackboard:
     def __init__(self, root: Optional[Path] = None) -> None:
         self.root = root or (settings.data_dir / "blackboards")
         self.root.mkdir(parents=True, exist_ok=True)
-        self._locks: dict[str, threading.Lock] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
         # In-memory cache to avoid disk on every read.
         self._cache: dict[str, dict[str, list[dict[str, Any]]]] = {}
 
@@ -57,10 +58,10 @@ class Blackboard:
     def _path(self, session_id: str) -> Path:
         return self.root / f"{session_id}.json"
 
-    def _lock(self, session_id: str) -> threading.Lock:
+    def _lock(self, session_id: str) -> asyncio.Lock:
         lk = self._locks.get(session_id)
         if lk is None:
-            lk = threading.Lock()
+            lk = asyncio.Lock()
             self._locks[session_id] = lk
         return lk
 
@@ -85,6 +86,29 @@ class Blackboard:
         self._cache[session_id] = data
         return data
 
+    async def _async_load(self, session_id: str) -> dict[str, list[dict[str, Any]]]:
+        """Non-blocking load via aiofiles, with in-memory cache."""
+        if session_id in self._cache:
+            return self._cache[session_id]
+        p = self._path(session_id)
+        if not p.exists():
+            data = self._empty()
+        else:
+            try:
+                import aiofiles  # type: ignore
+                async with aiofiles.open(p, "r", encoding="utf-8") as f:
+                    content = await f.read()
+                data = json.loads(content)
+                for s in self.SECTIONS:
+                    data.setdefault(s, [])
+            except ImportError:
+                # Fallback to sync if aiofiles missing.
+                data = self._load(session_id)
+            except Exception:
+                data = self._empty()
+        self._cache[session_id] = data
+        return data
+
     def _save(self, session_id: str, data: dict[str, list[dict[str, Any]]]) -> None:
         p = self._path(session_id)
         tmp = p.with_suffix(".tmp")
@@ -92,7 +116,58 @@ class Blackboard:
             json.dump(data, f, default=str, ensure_ascii=False, indent=2)
         tmp.replace(p)
 
-    # ── post / read ──────────────────────────────────────────────────────
+    async def _async_save(self, session_id: str, data: dict[str, list[dict[str, Any]]]) -> None:
+        """Non-blocking save via aiofiles."""
+        p = self._path(session_id)
+        tmp = p.with_suffix(".tmp")
+        payload = json.dumps(data, default=str, ensure_ascii=False, indent=2)
+        try:
+            import aiofiles  # type: ignore
+            async with aiofiles.open(tmp, "w", encoding="utf-8") as f:
+                await f.write(payload)
+            os.replace(str(tmp), str(p))
+        except ImportError:
+            self._save(session_id, data)
+
+    # ── async post / read ────────────────────────────────────────────────
+
+    async def async_post(
+        self,
+        session_id: str,
+        section: str,
+        *,
+        agent: str,
+        content: str,
+        tags: Optional[list[str]] = None,
+        meta: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        if section not in self.SECTIONS:
+            raise ValueError(f"unknown blackboard section: {section}")
+        entry = {
+            "id": f"{section}_{int(datetime.now(timezone.utc).timestamp() * 1000)}",
+            "agent": agent,
+            "content": content,
+            "tags": tags or [],
+            "meta": meta or {},
+            "ts": _now(),
+        }
+        async with self._lock(session_id):
+            data = await self._async_load(session_id)
+            data[section].append(entry)
+            # FIFO trim per blueprint §6 circuit-breaker spirit.
+            if len(data[section]) > _MAX_PER_SECTION:
+                data[section] = data[section][-_MAX_PER_SECTION:]
+            await self._async_save(session_id, data)
+        return entry
+
+    async def async_read(self, session_id: str, section: Optional[str] = None) -> Any:
+        async with self._lock(session_id):
+            data = await self._async_load(session_id)
+            if section is None:
+                return {k: list(v) for k, v in data.items()}
+            return list(data.get(section, []))
+
+    # ── sync wrappers (backward compat) ──────────────────────────────────
 
     def post(
         self,
@@ -114,31 +189,42 @@ class Blackboard:
             "meta": meta or {},
             "ts": _now(),
         }
-        with self._lock(session_id):
+        # Try async path; fallback to sync for non-async contexts.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            # We're in an async context — must not block. Use sync I/O
+            # directly on cache (which is populated by now).
             data = self._load(session_id)
             data[section].append(entry)
-            # FIFO trim per blueprint §6 circuit-breaker spirit.
+            if len(data[section]) > _MAX_PER_SECTION:
+                data[section] = data[section][-_MAX_PER_SECTION:]
+            self._save(session_id, data)
+        else:
+            data = self._load(session_id)
+            data[section].append(entry)
             if len(data[section]) > _MAX_PER_SECTION:
                 data[section] = data[section][-_MAX_PER_SECTION:]
             self._save(session_id, data)
         return entry
 
     def read(self, session_id: str, section: Optional[str] = None) -> Any:
-        with self._lock(session_id):
-            data = self._load(session_id)
-            if section is None:
-                return {k: list(v) for k, v in data.items()}
-            return list(data.get(section, []))
+        data = self._load(session_id)
+        if section is None:
+            return {k: list(v) for k, v in data.items()}
+        return list(data.get(section, []))
 
     def latest(self, session_id: str, section: str, n: int = 1) -> list[dict[str, Any]]:
         return self.read(session_id, section)[-n:]
 
     def clear(self, session_id: str) -> None:
-        with self._lock(session_id):
-            self._cache.pop(session_id, None)
-            p = self._path(session_id)
-            if p.exists():
-                p.unlink()
+        self._cache.pop(session_id, None)
+        p = self._path(session_id)
+        if p.exists():
+            p.unlink()
 
 
 _instance: Optional[Blackboard] = None

@@ -45,6 +45,12 @@ class PipelineConfig(BaseModel):
     data_augmentation: bool = False
     resume_checkpoint: Optional[str] = None
 
+    # v4.0: efficiency-first training knobs
+    quantization: Literal["none", "int4", "int8", "4bit", "8bit"] = "none"
+    use_unsloth: bool = False
+    optimizer: Literal["adamw", "galore", "galore_q", "adam8bit"] = "adamw"
+    use_liger: bool = False
+
 
 class PipelineRecord(BaseModel):
     id: str

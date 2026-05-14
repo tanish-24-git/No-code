@@ -1,10 +1,18 @@
 """AgentSession lifecycle. Persists to data/sessions/<id>.json via the JSON
 store. State transitions are validated against ALLOWED_TRANSITIONS so an
-errant agent can't push the FSM somewhere illegal."""
+errant agent can't push the FSM somewhere illegal.
+
+v4.0 — Fully async. All locks are ``asyncio.Lock``, all disk writes go
+through ``store.async_write`` (aiofiles) so the event loop never blocks.
+Synchronous wrappers are kept for backward-compatible call-sites that
+haven't migrated yet; they delegate to the async core via
+``asyncio.get_event_loop().run_until_complete`` when called outside an
+active loop, or schedule on the running loop otherwise.
+"""
 from __future__ import annotations
 
+import asyncio
 import logging
-import threading
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
@@ -22,36 +30,85 @@ from app.storage import store
 
 log = logging.getLogger("finetune-studio.sessions")
 _COLLECTION = "sessions"
-_session_locks: dict[str, threading.Lock] = {}
 
-def _get_lock(session_id: str) -> threading.Lock:
+# ── Async lock registry ───────────────────────────────────────────────────
+_session_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_lock(session_id: str) -> asyncio.Lock:
+    """Return (or create) an ``asyncio.Lock`` for the given session."""
     if session_id not in _session_locks:
-        _session_locks[session_id] = threading.Lock()
+        _session_locks[session_id] = asyncio.Lock()
     return _session_locks[session_id]
-
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# ── Async persistence ─────────────────────────────────────────────────────
+
+async def _persist_async(s: AgentSession) -> None:
+    """Non-blocking write via aiofiles."""
+    s.updated_at = _now()
+    await store.async_write(_COLLECTION, s.id, s.model_dump(mode="json"))
+
+
 def _persist(s: AgentSession) -> None:
+    """Synchronous fallback for non-async call-sites."""
     s.updated_at = _now()
     store.write(_COLLECTION, s.id, s.model_dump(mode="json"))
 
 
-def _update_atomic(session: AgentSession, updater: Callable[[AgentSession], None]) -> AgentSession:
-    with _get_lock(session.id):
-        latest = get(session.id)
+async def _update_atomic_async(
+    session: AgentSession, updater: Callable[[AgentSession], None]
+) -> AgentSession:
+    """Lock-protected read-modify-write using asyncio.Lock + aiofiles."""
+    async with _get_lock(session.id):
+        latest = await async_get(session.id)
         if not latest:
             latest = session
         updater(latest)
-        _persist(latest)
+        await _persist_async(latest)
         session.__dict__.update(latest.__dict__)
         return session
 
 
+def _update_atomic(
+    session: AgentSession, updater: Callable[[AgentSession], None]
+) -> AgentSession:
+    """Synchronous wrapper — schedules the async version if a loop is running,
+    otherwise falls back to sync I/O for backward compat."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None and loop.is_running():
+        # We're inside an async context but called synchronously. Use a
+        # future so we don't deadlock. This path exists purely for legacy
+        # call-sites that haven't migrated yet.
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, _update_atomic_async(session, updater))
+            return future.result()
+
+    return asyncio.run(_update_atomic_async(session, updater))
+
+
 # ── Read-side ──────────────────────────────────────────────────────────────
+
+async def async_get(session_id: str) -> Optional[AgentSession]:
+    """Non-blocking session read."""
+    raw = await store.async_read(_COLLECTION, session_id)
+    if not raw:
+        return None
+    try:
+        return AgentSession(**raw)
+    except Exception:
+        log.exception("session %s is corrupt", session_id)
+        return None
+
 
 def get(session_id: str) -> Optional[AgentSession]:
     raw = store.read(_COLLECTION, session_id)
@@ -101,7 +158,7 @@ def get_by_dataset(dataset_id: str) -> Optional[AgentSession]:
 def start_for_dataset(dataset_id: str) -> AgentSession:
     sid = store.new_id()
     now = _now()
-    
+
     # Try to get a meaningful name from the dataset
     name = "New Session"
     ds = dataset_service.get_dataset(dataset_id)

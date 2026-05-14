@@ -1,5 +1,9 @@
 """TrainingStrategyAgent: picks method/precision/batch/seq_len/lr/epochs.
 
+v4.0 — Efficiency-First kernel. Prioritizes **Unsloth** for 2x-5x faster
+training and **GaLore** for memory-efficient 7B+ fine-tuning on consumer
+hardware (8GB-16GB VRAM). Supports Liger-Kernel Triton-optimized losses.
+
 Always honors any user directive captured upstream (e.g. "use 5 epochs",
 "prefer DoRA"). The LLM, when configured, proposes a strict-JSON
 StrategyChoice; we validate it. The deterministic fallback is computed
@@ -61,12 +65,27 @@ class TrainingStrategyAgent(BaseAgent):
                 f"Hardware: {hw}\nProfile: {profile}\nTask: {task}\n"
                 f"Model: {chosen_model.get('repo_id')} ({chosen_model.get('params_b')}B)\n"
                 f"Priority: {priority}\n\n"
-                "Design the optimal fine-tuning strategy (method, precision, epochs, batch, lr, etc.). "
-                "Base your decision on the model architecture, VRAM constraints, and dataset profile. "
-                "Output ONLY the StrategyChoice JSON."
+                "Design the optimal fine-tuning strategy. You MUST follow these rules:\n\n"
+                "1. **UNSLOTH FIRST**: If the model architecture is supported by Unsloth "
+                "(LLaMA, Mistral, Gemma, Phi, Qwen families), set use_unsloth=true and "
+                "kernel_pack='unsloth'. This gives 2x-5x speedup at zero cost.\n\n"
+                "2. **GALORE FOR VRAM CONSTRAINTS**: If the model has 7B+ parameters and "
+                "available VRAM is ≤16GB, set optimizer='galore' or 'galore_q'. GaLore "
+                "projects gradients to a low-rank subspace, cutting optimizer memory by 65%%. "
+                "This enables 7B fine-tuning on 12GB VRAM without full 4-bit quantization.\n\n"
+                "3. **LIGER-KERNEL**: If CUDA is available, set use_liger=true for "
+                "Triton-optimized cross-entropy and RMS-norm — 20%% throughput gain.\n\n"
+                "4. **COMBINE TECHNIQUES**: For extreme VRAM constraints (≤12GB + 7B model), "
+                "use QLoRA + GaLore + Unsloth together. This is the industrial recipe.\n\n"
+                "5. Base your decision on the model architecture, VRAM constraints, and "
+                "dataset profile. Output ONLY the StrategyChoice JSON."
             ),
             StrategyChoice,
-            system="You are an autonomous MLOps architect. Design the best job for this model specimen.",
+            system=(
+                "You are an autonomous MLOps architect specializing in efficient fine-tuning. "
+                "You prioritize Unsloth and GaLore for maximum training throughput on "
+                "consumer hardware. Design the best job for this model specimen."
+            ),
             stream_thoughts=False,
             parent=event.id,
         )
@@ -89,10 +108,17 @@ class TrainingStrategyAgent(BaseAgent):
         est_min = float(runtime.get("estimated_minutes", 0.0))
 
         stack_bits = [strategy.get("method", "lora")]
+        if strategy.get("use_unsloth"):
+            stack_bits.append("+Unsloth")
         if strategy.get("adapter_variant") and strategy["adapter_variant"] != "none":
             stack_bits.append(f"+{strategy['adapter_variant'].upper()}")
+        if strategy.get("optimizer") and strategy["optimizer"] not in ("adamw",):
+            stack_bits.append(f"+{strategy['optimizer'].upper()}")
+        if strategy.get("use_liger"):
+            stack_bits.append("+Liger")
         if strategy.get("kernel_pack") and strategy["kernel_pack"] != "standard":
-            stack_bits.append(f"+{strategy['kernel_pack']}")
+            if "Unsloth" not in str(stack_bits):  # avoid duplicate
+                stack_bits.append(f"+{strategy['kernel_pack']}")
         if strategy.get("quantization") and strategy["quantization"] != "none":
             stack_bits.append(f"+{strategy['quantization']}")
         stack = " ".join(stack_bits)
@@ -200,6 +226,17 @@ class TrainingStrategyAgent(BaseAgent):
             strategy["quantization"] = "int4"
         if "unsloth" in text:
             strategy["kernel_pack"] = "unsloth"
+            strategy["use_unsloth"] = True
+        if "galore" in text:
+            strategy["optimizer"] = "galore"
+            strategy["adapter_variant"] = "galore"
+        if "galore_q" in text or "galore-q" in text:
+            strategy["optimizer"] = "galore_q"
+        if "liger" in text:
+            strategy["use_liger"] = True
+            strategy["kernel_pack"] = "liger"
+        if "adam8bit" in text or "8bit adam" in text:
+            strategy["optimizer"] = "adam8bit"
         m = re.search(r"lr\s*=?\s*([\d\.eE\-\+]+)", text)
         if m:
             try:
