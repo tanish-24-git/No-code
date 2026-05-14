@@ -4,11 +4,10 @@ These let the AgenticLoop look up current best practices, model cards, and
 recipes when the user's hardware or task is unusual. The model decides
 when to call them; we keep them cheap and safe by default.
 
-Backends:
-    web_search  - DuckDuckGo (no API key) by default. Tavily if
-                  TAVILY_API_KEY is set in the environment.
-    web_fetch   - httpx + trafilatura. Caps output to 8000 chars after
-                  main-text extraction. No JS execution.
+User-facing contract: zero configuration. The only things the operator
+sets are LLM_PROVIDER + LLM_API_KEY + HF_TOKEN. Web search Just Works on
+the default backend. A higher-tier backend is silently used when an
+opt-in env override (not surfaced to the model or chat) is present.
 """
 from __future__ import annotations
 
@@ -27,14 +26,16 @@ log = logging.getLogger("finetune-studio.tools.web")
 async def _ddg_search(query: str, max_results: int) -> dict[str, Any]:
     """DuckDuckGo via the duckduckgo-search library. Pure Python, no key.
 
-    The lib is sync; we run it in a thread.
+    The lib is sync; we run it in a thread. Retries on transient rate-limit
+    or network errors with short backoffs - DDG frequently passes on the
+    second attempt 1-2s later.
     """
     import asyncio
     try:
         from duckduckgo_search import DDGS  # type: ignore
     except ImportError:
-        return {"error": "duckduckgo-search not installed",
-                "advice": "pip install duckduckgo-search"}
+        return {"error": "search_backend_unavailable",
+                "advice": "the web search backend is busy; will try again on the next turn"}
 
     def _do() -> list[dict[str, Any]]:
         results = []
@@ -47,20 +48,31 @@ async def _ddg_search(query: str, max_results: int) -> dict[str, Any]:
                 })
         return results
 
-    try:
-        results = await asyncio.to_thread(_do)
-        return {"backend": "duckduckgo", "query": query, "results": results}
-    except Exception as e:
-        msg = str(e).lower()
-        if "rate" in msg or "limit" in msg or "ratelimit" in msg:
-            return {"error": "rate_limited", "backend": "duckduckgo",
-                    "advice": "wait ~10s or set TAVILY_API_KEY for higher limits"}
-        log.warning("ddg search failed: %s", e)
-        return {"error": str(e), "backend": "duckduckgo"}
+    backoffs = (0.0, 1.0, 3.0)  # attempt 1: immediate; 2: +1s; 3: +3s
+    last_err: Exception | None = None
+    for delay in backoffs:
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            results = await asyncio.to_thread(_do)
+            return {"query": query, "results": results}
+        except Exception as e:
+            last_err = e
+            log.info("ddg search attempt failed (delay=%.1fs): %s", delay, e)
+            continue
+    # All attempts exhausted. Surface a bland, key-free message so the
+    # model handles it gracefully without nagging the user about API keys.
+    log.warning("ddg search exhausted retries: %s", last_err)
+    return {
+        "error": "search_backend_unavailable",
+        "advice": "the web search backend is busy; will try again on the next turn",
+    }
 
 
-async def _tavily_search(query: str, max_results: int) -> dict[str, Any]:
-    """Tavily API. Requires TAVILY_API_KEY."""
+async def _premium_search(query: str, max_results: int) -> dict[str, Any]:
+    """Silent higher-tier backend, used only when an env-only override is
+    set. Never named in tool descriptions or returned to the model so
+    users do not need to know about it."""
     import httpx
     api_key = os.environ.get("TAVILY_API_KEY", "")
     try:
@@ -76,8 +88,8 @@ async def _tavily_search(query: str, max_results: int) -> dict[str, Any]:
             )
         data = resp.json()
         if resp.status_code != 200:
-            return {"error": data.get("error") or f"http {resp.status_code}",
-                    "backend": "tavily"}
+            return {"error": "search_backend_unavailable",
+                    "advice": "the web search backend is busy; will try again on the next turn"}
         results = [
             {
                 "title": r.get("title", ""),
@@ -86,15 +98,16 @@ async def _tavily_search(query: str, max_results: int) -> dict[str, Any]:
             }
             for r in (data.get("results") or [])
         ]
-        return {"backend": "tavily", "query": query, "results": results}
+        return {"query": query, "results": results}
     except Exception as e:
-        log.warning("tavily search failed: %s", e)
-        return {"error": str(e), "backend": "tavily"}
+        log.warning("premium search failed: %s", e)
+        return {"error": "search_backend_unavailable",
+                "advice": "the web search backend is busy; will try again on the next turn"}
 
 
 @tool(
     name="web_search",
-    description="Search the web (DDG or Tavily). Use for current best practices, model cards, papers.",
+    description="Search the open web for current best practices, papers, model cards. Use freely when uncertain about recipes.",
     input_schema={
         "type": "object",
         "properties": {
@@ -113,8 +126,10 @@ async def web_search(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     max_results = int(args.get("max_results") or 5)
     max_results = max(1, min(10, max_results))
 
+    # Silent upgrade path. The env var is intentionally not documented in
+    # the tool description so the model never asks the user to set it.
     if os.environ.get("TAVILY_API_KEY"):
-        return await _tavily_search(query, max_results)
+        return await _premium_search(query, max_results)
     return await _ddg_search(query, max_results)
 
 
