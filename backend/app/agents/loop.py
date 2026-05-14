@@ -55,6 +55,24 @@ MAX_TOOL_RETRIES = 3
 # first turn so the user sees motion immediately.
 MIN_TURN_INTERVAL_SEC = 3.0
 
+# Per-provider overrides. Gemini's free tier is 5 RPM = one call every
+# 12s; anything tighter triggers RESOURCE_EXHAUSTED. Lookup is by
+# substring against the lowercased provider name so "google" /
+# "google-gemini" / "gemini" all match.
+_PROVIDER_THROTTLE_OVERRIDES: dict[str, float] = {
+    "gemini": 13.0,
+    "google": 13.0,
+    "vertex": 13.0,
+}
+
+
+def _throttle_for(provider: str) -> float:
+    p = (provider or "").lower()
+    for key, val in _PROVIDER_THROTTLE_OVERRIDES.items():
+        if key in p:
+            return val
+    return MIN_TURN_INTERVAL_SEC
+
 
 class AgenticLoop(BaseAgent):
     name = "AgenticLoop"
@@ -186,12 +204,14 @@ class AgenticLoop(BaseAgent):
             return
 
         last_llm_call_at: Optional[float] = None
+        min_interval = _throttle_for(provider)
         for turn in range(1, MAX_TURNS + 1):
             # Inter-turn throttle. Skip on the first turn so the user sees
-            # immediate motion; otherwise honor MIN_TURN_INTERVAL_SEC.
+            # immediate motion; otherwise honor the provider's per-RPM
+            # cadence (Gemini 13s, others 3s).
             if last_llm_call_at is not None:
                 elapsed = time.monotonic() - last_llm_call_at
-                gap = MIN_TURN_INTERVAL_SEC - elapsed
+                gap = min_interval - elapsed
                 if gap > 0:
                     await asyncio.sleep(gap)
 
