@@ -163,6 +163,9 @@ class AgenticLoop(BaseAgent):
 
         if first_turn_user:
             messages.append({"role": "user", "content": "\n\n".join(first_turn_user)})
+        else:
+            # Most providers (like Gemini) require at least one user message to begin.
+            messages.append({"role": "user", "content": "I have uploaded the dataset. Please begin your autonomous profiling and strategy formulation."})
 
         provider, model, base_url, api_key = self._resolve_provider(sid)
         if not provider or not model:
