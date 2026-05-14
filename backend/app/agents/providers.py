@@ -36,6 +36,10 @@ from app.agents.tools import SYSTEM_PROMPT, TOOLS, run_tool
 
 
 log = logging.getLogger("finetune-studio.providers")
+# Dedicated channel for diagnostic dumps when a provider rejects a
+# function/tool call. Quiet by default; grep for "failed_generation" in
+# docker logs after a Groq function-call validation error.
+failed_gen_log = logging.getLogger("finetune-studio.providers.failed_generation")
 
 
 def stream_anthropic(
@@ -472,12 +476,13 @@ async def stream_openai_async(
             for t in tools
         ]
 
+    # Hoist these out of the try block so the failed_generation diagnostic
+    # below can always reference them even if the very first await throws.
+    tool_calls: dict[int, dict[str, Any]] = {}
+    text_buf = ""
+    stop_reason = "stop"
     try:
         stream = await client.chat.completions.create(**kwargs)
-        # index -> {"id", "name", "args_buf"}
-        tool_calls: dict[int, dict[str, Any]] = {}
-        text_buf = ""
-        stop_reason = "stop"
         async for chunk in stream:
             choice = chunk.choices[0] if chunk.choices else None
             if not choice:
@@ -520,8 +525,30 @@ async def stream_openai_async(
 
         yield {"kind": "stop", "reason": stop_reason}
     except Exception as e:
-        log.warning("openai async stream failed: %s", e)
-        yield {"kind": "error", "error": str(e)}
+        err_text = str(e)
+        log.warning("openai async stream failed: %s", err_text)
+        # When the provider rejects the model's tool call (Groq's
+        # llama-3.3-70b is the known offender), dump what we had buffered
+        # so the operator can see what the model emitted.
+        lowered = err_text.lower()
+        if ("function call" in lowered
+                or "function_call" in lowered
+                or "failed_generation" in lowered
+                or "tool call" in lowered):
+            pending_tools = [
+                {"name": s.get("name"), "args_raw": (s.get("args_buf") or "")[:500]}
+                for s in tool_calls.values()
+            ]
+            last_user_content = ""
+            if history:
+                last = history[-1].get("content")
+                if isinstance(last, str):
+                    last_user_content = last[:500]
+            failed_gen_log.warning(
+                "model=%s rejected_tool_call err=%r assistant_text=%r pending_tools=%r last_user=%r",
+                model, err_text, (text_buf or "")[:500], pending_tools, last_user_content,
+            )
+        yield {"kind": "error", "error": err_text}
         yield {"kind": "stop", "reason": "error"}
 
 

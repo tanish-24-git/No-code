@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Optional
 
 from app.agents.base import BaseAgent
@@ -47,6 +48,12 @@ log = logging.getLogger("finetune-studio.agents.loop")
 
 MAX_TURNS = 50
 MAX_TOOL_RETRIES = 3
+# Minimum wall-clock gap between consecutive LLM calls in the same run.
+# Smooths burst traffic so free-tier providers (Groq 30 RPM, Gemini 5 RPM)
+# do not slam into 429 retry storms. The sleep is asyncio-cancellable, so a
+# UserMessage interrupt still cancels promptly. Not applied before the
+# first turn so the user sees motion immediately.
+MIN_TURN_INTERVAL_SEC = 3.0
 
 
 class AgenticLoop(BaseAgent):
@@ -178,7 +185,16 @@ class AgenticLoop(BaseAgent):
             )
             return
 
+        last_llm_call_at: Optional[float] = None
         for turn in range(1, MAX_TURNS + 1):
+            # Inter-turn throttle. Skip on the first turn so the user sees
+            # immediate motion; otherwise honor MIN_TURN_INTERVAL_SEC.
+            if last_llm_call_at is not None:
+                elapsed = time.monotonic() - last_llm_call_at
+                gap = MIN_TURN_INTERVAL_SEC - elapsed
+                if gap > 0:
+                    await asyncio.sleep(gap)
+
             # Drain any user messages that arrived between turns.
             extra: list[str] = []
             while not inbox.empty():
@@ -241,6 +257,10 @@ class AgenticLoop(BaseAgent):
                         stop_reason = chunk.get("reason", "stop")
             except asyncio.CancelledError:
                 raise
+            finally:
+                # Stamp the moment the stream returned (success or error)
+                # so the next turn's throttle measures from here.
+                last_llm_call_at = time.monotonic()
 
             # Record what the assistant said this turn into the working
             # conversation. Skip empty assistant turns to keep context tight.

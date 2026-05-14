@@ -15,8 +15,13 @@ python-dotenv==1.0.1
 cryptography==42.0.8
 aiofiles==23.2.1
 
-# Web grounding for the AgenticLoop (search + fetch + readability)
+# Web grounding for the AgenticLoop (search + fetch + readability).
+# Multiple no-API-key backends are tried in a fallback chain inside
+# app/tools/web.py - DuckDuckGo, Google (direct scrape), SearXNG public
+# instances, and Wikipedia. None of these require the user to register
+# anywhere or paste a key.
 duckduckgo-search==6.3.0
+googlesearch-python==1.2.4
 trafilatura==1.12.2
 
 # Data

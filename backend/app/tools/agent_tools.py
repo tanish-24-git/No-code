@@ -264,8 +264,8 @@ async def evaluate_model(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
         "type": "object",
         "properties": {
             "target": {"type": "string", "enum": ["local", "hf", "both"]},
-            "repo_id": {"type": "string"},
-            "name": {"type": "string"},
+            "repo_id": {"type": ["string", "null"]},
+            "name": {"type": ["string", "null"]},
         },
         "required": ["target"],
     },
@@ -302,6 +302,54 @@ async def export_artifact(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
 # Interactive tools owned by the loop (not wrapping any existing agent)
 # ══════════════════════════════════════════════════════════════════════════
 
+# Synonym map so the LLM can use natural-language phase names ("training",
+# "fine-tuning", "data prep", ...) and we still hit canonical PHASES
+# entries for proper canvas node materialization. Unknown phases pass
+# through (phase_service no longer raises - it just logs a warning).
+_PHASE_SYNONYMS: dict[str, str] = {
+    "training": "execute",
+    "train": "execute",
+    "fine tuning": "execute",
+    "finetuning": "execute",
+    "fine tune": "execute",
+    "execution": "execute",
+    "eval": "evaluate",
+    "evaluation": "evaluate",
+    "model selection": "model_search",
+    "model search": "model_search",
+    "model": "model_search",
+    "hyperparameters": "strategy",
+    "config": "strategy",
+    "configuration": "strategy",
+    "data prep": "profile",
+    "preprocessing": "profile",
+    "preprocess": "profile",
+    "data": "profile",
+    "upload": "intake",
+    "ingest": "intake",
+    "deploy": "export",
+    "save": "export",
+    "publish": "export",
+    "pipeline": "plan",
+    "device": "hardware",
+}
+
+
+def _coerce_phase(raw: str) -> str:
+    """Map a free-form phase string to a canonical PHASES entry when there
+    is a sensible synonym; otherwise leave it untouched so the upstream
+    log warning fires. Never crashes."""
+    if not raw:
+        return "master_plan"
+    # Normalize: lowercase, collapse hyphens and underscores to spaces.
+    key = raw.strip().lower().replace("-", " ").replace("_", " ")
+    if key in _PHASE_SYNONYMS:
+        return _PHASE_SYNONYMS[key]
+    # If the LLM already gave a canonical name (with whatever casing),
+    # return the lowercase form for consistency with PHASES.
+    return raw.strip().lower().replace("-", "_").replace(" ", "_")
+
+
 @tool(
     name="propose_plan",
     description="Show user a plan card; wait for Approve or Comment. Comments become global directives.",
@@ -321,7 +369,7 @@ async def export_artifact(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
 )
 async def propose_plan(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     helper = _helper(ctx)
-    phase = args.get("phase") or "loop_plan"
+    phase = _coerce_phase(args.get("phase") or "")
     title = args.get("title") or "Plan"
     summary = args.get("summary") or ""
     steps = list(args.get("steps") or [])
@@ -347,9 +395,9 @@ async def propose_plan(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]
         "type": "object",
         "properties": {
             "question": {"type": "string"},
-            "kind": {"type": "string", "enum": ["text", "single_choice", "multi_choice", "yes_no"]},
-            "choices": {"type": "array", "items": {"type": "string"}},
-            "impact": {"type": "string", "enum": ["low", "medium", "high"]},
+            "kind": {"type": ["string", "null"], "enum": ["text", "single_choice", "multi_choice", "yes_no", None]},
+            "choices": {"type": ["array", "null"], "items": {"type": "string"}},
+            "impact": {"type": ["string", "null"], "enum": ["low", "medium", "high", None]},
         },
         "required": ["question"],
     },
@@ -429,7 +477,7 @@ async def ask_user(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
             "kind": {"type": "string"},
             "chosen": {},
             "rationale": {"type": "string"},
-            "confidence": {"type": "number"},
+            "confidence": {"type": ["number", "null"]},
         },
         "required": ["kind", "chosen", "rationale"],
     },
@@ -520,8 +568,8 @@ async def extract_raw_text(args: dict[str, Any], ctx: ToolContext) -> dict[str, 
     input_schema={
         "type": "object",
         "properties": {
-            "target_format": {"type": "string", "enum": ["instruction", "chat", "qa", "classification", "language_modeling"]},
-            "user_intent": {"type": "string"},
+            "target_format": {"type": ["string", "null"], "enum": ["instruction", "chat", "qa", "classification", "language_modeling", None]},
+            "user_intent": {"type": ["string", "null"]},
         },
     },
     side_effect="write_resource",
@@ -589,11 +637,14 @@ async def synthesize_unified_dataset(args: dict[str, Any], ctx: ToolContext) -> 
     input_schema={
         "type": "object",
         "properties": {
-            "query": {"type": "string"},
-            "family": {"type": "string"},
-            "size_b": {"type": "number"},
-            "task": {"type": "string"},
-            "top_n": {"type": "integer"},
+            # All optional fields accept null because some providers
+            # (Groq llama-3.3-70b) emit null instead of omitting the key,
+            # which strict schemas would reject server-side.
+            "query": {"type": ["string", "null"]},
+            "family": {"type": ["string", "null"]},
+            "size_b": {"type": ["number", "null"]},
+            "task": {"type": ["string", "null"]},
+            "top_n": {"type": ["integer", "null"]},
         },
     },
     side_effect="external",
@@ -601,12 +652,17 @@ async def synthesize_unified_dataset(args: dict[str, Any], ctx: ToolContext) -> 
 async def search_hf_models(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     # Delegate to the legacy registered tool which already exists.
     from app.tools.registry import run_tool as _run
+    top_n_raw = args.get("top_n")
+    try:
+        top_n = int(top_n_raw) if top_n_raw is not None else 10
+    except (TypeError, ValueError):
+        top_n = 10
     payload = {
-        "query": args.get("query"),
-        "family_hint": args.get("family"),
+        "query": args.get("query") or None,
+        "family_hint": args.get("family") or None,
         "size_hint_b": args.get("size_b"),
         "task": args.get("task") or "instruction",
-        "top_n": int(args.get("top_n") or 10),
+        "top_n": top_n,
         "instruct_only": True,
     }
     return await _run("model.search_hf", payload, ctx)
