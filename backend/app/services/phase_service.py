@@ -15,11 +15,15 @@ the agent waits for an explicit approve / comment.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from app.events.bus import EventBus
 from app.events.types import AgentEvent
+
+
+log = logging.getLogger("finetune-studio.phase")
 
 
 # Canonical phase names. Keep in sync with the FE node map.
@@ -109,7 +113,11 @@ async def announce_phase(
     otherwise.
     """
     if phase not in PHASES:
-        raise ValueError(f"unknown phase: {phase!r}")
+        # Don't crash the loop when the LLM invents a phase name like
+        # "fine-tuning" or "training" - log it and continue. The node
+        # mapping falls back to None and the FE renders a generic card.
+        log.warning("non-canonical phase %r announced by %s; rendering as generic card",
+                    phase, actor)
     payload = {
         "phase": phase,
         "node": PHASE_TO_NODE.get(phase),

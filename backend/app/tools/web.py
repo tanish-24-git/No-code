@@ -240,7 +240,9 @@ _BACKENDS: tuple[BackendFn, ...] = (
         "type": "object",
         "properties": {
             "query": {"type": "string"},
-            "max_results": {"type": "integer"},
+            # Optional fields accept null because some providers (Groq's
+            # llama-3.3-70b) send null instead of omitting the key.
+            "max_results": {"type": ["integer", "null"]},
         },
         "required": ["query"],
     },
