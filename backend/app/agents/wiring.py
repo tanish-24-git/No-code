@@ -1,29 +1,31 @@
-"""Single source of truth for the event → agent mapping. Called once at
-FastAPI startup. Adding a new agent is a one-entry change here."""
+"""Single source of truth for the event -> agent mapping.
+
+v5.0 - AgenticLoop. The static fan-out DAG of 20 agents is gone. The
+loop is the orchestrator now: it thinks, picks tools, observes, repeats,
+and reacts to user messages mid-flow. Most of the old specialty agents
+live on as tool implementations called by the loop (see
+``backend/app/tools/agent_tools.py``), not as bus subscribers.
+
+We keep three subscriptions only:
+
+    DatasetIntakeAgent     reactive to upload; populates dataset_facts
+                           and emits IntakeCompleted (which wakes the loop)
+    AgenticLoop            the model-driven core. Triggers on
+                           SessionStarted, IntakeCompleted, UserMessage.
+    TrainingMonitorAgent   reactive to training metric events from the
+                           training worker thread. Stays reactive because
+                           the metrics arrive asynchronously and the
+                           training tool is one long-running step inside
+                           the loop.
+"""
 from __future__ import annotations
 
 import logging
 
-from app.agents.alchemy import DataAlchemistAgent
-from app.agents.data_restructurer import DataRestructurerAgent
-from app.agents.audit import AuditAgent
 from app.agents.base import BaseAgent
-from app.agents.clarification import ClarificationAgent
-from app.agents.evaluation import EvaluationAgent
-from app.agents.execution import ExecutionAgent
-from app.agents.export import ExportAgent
-from app.agents.gates import ApprovalGate, ConfidenceGate
-from app.agents.hardware_analysis import HardwareAnalysisAgent
 from app.agents.intake import DatasetIntakeAgent
-from app.agents.model_selection import ModelSelectionAgent
+from app.agents.loop import AgenticLoop
 from app.agents.monitoring import TrainingMonitorAgent
-from app.agents.orchestrator import OrchestratorAgent
-from app.agents.pipeline_builder import PipelineBuilderAgent
-from app.agents.profiling import DatasetProfilingAgent
-from app.agents.recovery import RecoveryAgent
-from app.agents.sandbox import InferenceSandboxAgent
-from app.agents.strategy import TrainingStrategyAgent
-from app.agents.task_inference import TaskInferenceAgent
 from app.events.bus import EventBus
 
 
@@ -31,38 +33,22 @@ log = logging.getLogger("finetune-studio.agents.wiring")
 
 
 def register_agents(bus: EventBus) -> list[BaseAgent]:
-    """Instantiate every agent and subscribe it to its trigger events.
+    """Instantiate the three bus-subscribed agents and register them.
 
-    The roster matches blueprint §2: an Orchestrator (the General), an
-    intake / profile / hardware probe pair, the Data Alchemist, a
-    Task-Inference + Clarification round-robin, the Architectural Designer
-    (TrainingStrategy), the Pipeline Builder, the Audit Critic, the
-    Execution + Monitor + Recovery loop, the Inference Sandbox, the
-    Evaluation + Export pair, and the gates that route between them.
-
-    Returns the list of agent instances so they can be inspected at runtime.
+    Loop-only agents (Profiling, Hardware, ModelSelection, Strategy,
+    PipelineBuilder, Execution, Evaluation, Export, Restructurer, etc.)
+    are NOT instantiated here. They are imported and instantiated
+    on-demand by the tool wrappers in app/tools/agent_tools.py.
     """
+    # Importing agent_tools forces the @tool decorators in that module
+    # (and in app.tools.web) to register their tools so the AgenticLoop
+    # sees them on its first introspection of the registry.
+    import app.tools.agent_tools  # noqa: F401
+
     agents: list[BaseAgent] = [
-        OrchestratorAgent(bus),
         DatasetIntakeAgent(bus),
-        DatasetProfilingAgent(bus),
-        DataAlchemistAgent(bus),
-        DataRestructurerAgent(bus),
-        HardwareAnalysisAgent(bus),
-        TaskInferenceAgent(bus),
-        ConfidenceGate(bus),
-        ClarificationAgent(bus),
-        ModelSelectionAgent(bus),
-        TrainingStrategyAgent(bus),
-        PipelineBuilderAgent(bus),
-        ApprovalGate(bus),
-        AuditAgent(bus),
-        ExecutionAgent(bus),
+        AgenticLoop(bus),
         TrainingMonitorAgent(bus),
-        RecoveryAgent(bus),
-        EvaluationAgent(bus),
-        InferenceSandboxAgent(bus),
-        ExportAgent(bus),
     ]
     for agent in agents:
         for kind in agent.triggers:

@@ -30,11 +30,50 @@ class DatasetIntakeAgent(BaseAgent):
             await self.emit_error(session_id, "Missing dataset_id")
             return
 
-        # If the user uploaded a raw doc, the DataRestructurerAgent will
-        # produce a structured dataset and re-emit DatasetUploaded. Skip
-        # this run; we'll re-fire on the structured one.
         ds = dataset_service.get_dataset(dataset_id)
         if dataset_service.is_raw_doc(ds):
+            # For raw-doc uploads we do not run the structured-only
+            # inspection tools (they would fail). Post a brief intake
+            # message and emit IntakeCompleted with a raw_doc flag so the
+            # AgenticLoop wakes up and runs synthesize_unified_dataset.
+            await self.announce(
+                session_id,
+                phase="intake",
+                title="Reading your upload",
+                summary=(
+                    f"Detected raw document(s): **{ds.name}**. I will "
+                    "synthesize a trainable dataset from it shortly."
+                ),
+                steps=[
+                    "Walk the upload(s)",
+                    "Extract text from PDFs / DOCX / HTML",
+                    "Synthesize unified instruction-output dataset",
+                ],
+                requires_approval=False,
+                parent=event.id,
+            )
+            await self.emit_message(
+                session_id,
+                f"Got a raw-doc upload: **{ds.name}**. Tell me what you "
+                "want to do with it, or send any message and I will pick "
+                "a sensible default.",
+                parent=event.id,
+            )
+            await self.emit(
+                "IntakeCompleted",
+                session_id,
+                payload={
+                    "dataset_id": dataset_id,
+                    "raw_doc": True,
+                    "info": {
+                        "name": ds.name,
+                        "row_count": ds.row_count,
+                        "file_type": ds.file_type,
+                    },
+                    "field_buckets": {},
+                },
+                parent_event_id=event.id,
+            )
             return
 
         if session.state == FSMState.INIT:

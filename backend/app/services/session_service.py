@@ -197,6 +197,38 @@ def attach_artifact(session: AgentSession, key: str, value: Any) -> AgentSession
     return _update_atomic(session, _updater)
 
 
+# ── Async-native helpers (used by AgenticLoop and new tools) ──────────────
+# These avoid the ThreadPoolExecutor shim in _update_atomic for callers that
+# are already inside an asyncio loop.
+
+async def attach_artifact_async(session: AgentSession, key: str, value: Any) -> AgentSession:
+    def _updater(s: AgentSession) -> None:
+        s.artifacts[key] = value
+    return await _update_atomic_async(session, _updater)
+
+
+async def advance_state_async(session: AgentSession, target: FSMState, *, reason: str = "") -> AgentSession:
+    def _updater(s: AgentSession) -> None:
+        if target == s.state:
+            return
+        allowed = ALLOWED_TRANSITIONS.get(s.state, set())
+        if target not in allowed:
+            raise ValueError(
+                f"Illegal transition {s.state.value} -> {target.value} "
+                f"(allowed: {sorted(st.value for st in allowed)})"
+            )
+        log.info("session %s: %s -> %s (%s)", s.id, s.state.value, target.value, reason or "no reason")
+        s.state = target
+        s.state_entered_at = _now()
+    return await _update_atomic_async(session, _updater)
+
+
+async def set_confidence_async(session: AgentSession, confidence: float) -> AgentSession:
+    def _updater(s: AgentSession) -> None:
+        s.confidence = max(0.0, min(1.0, confidence))
+    return await _update_atomic_async(session, _updater)
+
+
 def attach_pipeline(session: AgentSession, pipeline_id: str) -> AgentSession:
     def _updater(s: AgentSession) -> None:
         s.pipeline_id = pipeline_id

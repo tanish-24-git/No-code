@@ -11,16 +11,31 @@ Two real engines are shipped:
 
 The dispatcher `stream_chat` looks up the configured provider in
 `registry.PROVIDERS`, picks the right engine and base URL, and runs it.
-Adding a provider is therefore a one-entry change in registry.py — no
+Adding a provider is therefore a one-entry change in registry.py - no
 new code here.
+
+This module exposes two layers:
+    stream_chat / stream_anthropic / stream_openai
+        Sync generators yielding plain text deltas. Used by the legacy
+        per-agent call_llm path.
+    stream_chat_async
+        Async generator yielding typed chunks (text / thinking /
+        tool_call / stop). Used by the AgenticLoop. Supports a tool-use
+        protocol so the loop can drive the model with arbitrary registered
+        tools, not just the legacy hardcoded TOOLS list.
 """
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import Any, Iterator
+import logging
+from typing import Any, AsyncIterator, Iterator, Optional
 
 from app.agents.registry import resolve_base_url, resolve_engine
 from app.agents.tools import SYSTEM_PROMPT, TOOLS, run_tool
+
+
+log = logging.getLogger("finetune-studio.providers")
 
 
 def stream_anthropic(
@@ -322,3 +337,273 @@ def stream_chat(
         )
         return
     raise ValueError(f"Unknown engine for provider {provider!r}: {engine}")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Async typed-chunk streaming (used by AgenticLoop)
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Yields dicts of shape:
+#   {"kind": "text", "delta": str}          - assistant text token
+#   {"kind": "thinking", "delta": str}      - extended-thinking token
+#   {"kind": "tool_call", "id": str,        - one full tool call after args
+#       "name": str, "args": dict}            JSON has been buffered
+#   {"kind": "stop", "reason": str}         - terminal event
+#   {"kind": "error", "error": str}         - non-fatal error; caller decides
+#
+# Anthropic native thinking is honored when the caller passes thinking=...
+# OpenAI providers do not stream thinking; we surface only text + tool_calls.
+
+async def stream_anthropic_async(
+    *,
+    api_key: str,
+    model: str,
+    base_url: str,
+    system: str,
+    messages: list[dict[str, Any]],
+    tools: Optional[list[dict[str, Any]]] = None,
+    thinking_budget: Optional[int] = None,
+    max_tokens: int = 4096,
+) -> AsyncIterator[dict[str, Any]]:
+    """Async stream over the Anthropic Messages API with typed events."""
+    from anthropic import AsyncAnthropic
+
+    client = AsyncAnthropic(api_key=api_key, base_url=base_url or None)
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": messages,
+    }
+    if tools:
+        kwargs["tools"] = tools
+    if thinking_budget and thinking_budget > 0:
+        kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
+
+    try:
+        async with client.messages.stream(**kwargs) as stream:
+            # In-progress tool-use blocks: index -> {"id", "name", "args_buf"}
+            tool_blocks: dict[int, dict[str, Any]] = {}
+            async for event in stream:
+                etype = getattr(event, "type", "")
+                if etype == "content_block_start":
+                    block = getattr(event, "content_block", None)
+                    btype = getattr(block, "type", "")
+                    if btype == "tool_use":
+                        idx = getattr(event, "index", 0)
+                        tool_blocks[idx] = {
+                            "id": getattr(block, "id", ""),
+                            "name": getattr(block, "name", ""),
+                            "args_buf": "",
+                        }
+                elif etype == "content_block_delta":
+                    delta = getattr(event, "delta", None)
+                    dtype = getattr(delta, "type", "")
+                    if dtype == "text_delta":
+                        yield {"kind": "text",
+                               "delta": getattr(delta, "text", "")}
+                    elif dtype == "thinking_delta":
+                        yield {"kind": "thinking",
+                               "delta": getattr(delta, "thinking", "")}
+                    elif dtype == "input_json_delta":
+                        idx = getattr(event, "index", 0)
+                        slot = tool_blocks.get(idx)
+                        if slot is not None:
+                            slot["args_buf"] += getattr(delta, "partial_json", "")
+                elif etype == "content_block_stop":
+                    idx = getattr(event, "index", 0)
+                    if idx in tool_blocks:
+                        slot = tool_blocks.pop(idx)
+                        try:
+                            args = json.loads(slot["args_buf"] or "{}")
+                        except json.JSONDecodeError:
+                            args = {}
+                        yield {"kind": "tool_call", "id": slot["id"],
+                               "name": slot["name"], "args": args}
+                elif etype == "message_stop":
+                    pass
+            final = await stream.get_final_message()
+            yield {"kind": "stop",
+                   "reason": getattr(final, "stop_reason", "end_turn") or "end_turn"}
+    except Exception as e:
+        log.warning("anthropic async stream failed: %s", e)
+        yield {"kind": "error", "error": str(e)}
+        yield {"kind": "stop", "reason": "error"}
+
+
+async def stream_openai_async(
+    *,
+    api_key: str,
+    model: str,
+    base_url: str,
+    system: str,
+    messages: list[dict[str, Any]],
+    tools: Optional[list[dict[str, Any]]] = None,
+    max_tokens: int = 4096,
+) -> AsyncIterator[dict[str, Any]]:
+    """Async stream over the OpenAI Chat Completions API (and any compatible
+    endpoint). Buffers tool-call deltas and emits each tool call atomically
+    when its block stops."""
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=api_key or "sk-not-needed",
+                         base_url=base_url or None)
+
+    history: list[dict[str, Any]] = [{"role": "system", "content": system}]
+    for m in messages:
+        history.append(m)
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": history,
+        "stream": True,
+        "max_tokens": max_tokens,
+    }
+    if tools:
+        kwargs["tools"] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema") or {"type": "object"},
+                },
+            }
+            for t in tools
+        ]
+
+    try:
+        stream = await client.chat.completions.create(**kwargs)
+        # index -> {"id", "name", "args_buf"}
+        tool_calls: dict[int, dict[str, Any]] = {}
+        text_buf = ""
+        stop_reason = "stop"
+        async for chunk in stream:
+            choice = chunk.choices[0] if chunk.choices else None
+            if not choice:
+                continue
+            delta = choice.delta
+            if delta and delta.content:
+                text_buf += delta.content
+                yield {"kind": "text", "delta": delta.content}
+            if delta and delta.tool_calls:
+                for tc in delta.tool_calls:
+                    slot = tool_calls.setdefault(tc.index, {"id": "", "name": "", "args_buf": ""})
+                    if tc.id:
+                        slot["id"] = tc.id
+                    if tc.function and tc.function.name:
+                        slot["name"] = tc.function.name
+                    if tc.function and tc.function.arguments:
+                        slot["args_buf"] += tc.function.arguments
+            fr = getattr(choice, "finish_reason", None)
+            if fr:
+                stop_reason = fr
+
+        # Flush buffered tool calls. OpenAI does not have an explicit
+        # per-call stop event in the delta stream; we treat finish_reason
+        # as the boundary.
+        for slot in tool_calls.values():
+            try:
+                args = json.loads(slot["args_buf"] or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            yield {"kind": "tool_call", "id": slot["id"],
+                   "name": slot["name"], "args": args}
+
+        # If the model was asked for tool use but emitted a JSON tool blob
+        # as text (weaker models do this), synthesize a tool call.
+        if tools and not tool_calls and text_buf.strip():
+            blob = _try_extract_text_tool_call(text_buf)
+            if blob is not None:
+                yield {"kind": "tool_call", "id": blob.get("id", "synth-0"),
+                       "name": blob["name"], "args": blob.get("args") or {}}
+
+        yield {"kind": "stop", "reason": stop_reason}
+    except Exception as e:
+        log.warning("openai async stream failed: %s", e)
+        yield {"kind": "error", "error": str(e)}
+        yield {"kind": "stop", "reason": "error"}
+
+
+def _try_extract_text_tool_call(text: str) -> Optional[dict[str, Any]]:
+    """If the model emitted ``{"tool": "...", "args": {...}}`` as text
+    instead of via the structured tool-call channel, parse and return it.
+    Helps with weaker local models that ignore the tool_use channel."""
+    import re
+    # Look for a fenced or bare JSON object that has both "tool" (or "name")
+    # and an "args" / "input" field.
+    candidates: list[str] = []
+    fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    candidates.extend(fenced)
+    # Bare top-level object as a fallback.
+    stripped = text.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        candidates.append(stripped)
+    for cand in candidates:
+        try:
+            obj = json.loads(cand)
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        name = obj.get("tool") or obj.get("name")
+        args = obj.get("args") or obj.get("input") or obj.get("arguments") or {}
+        if isinstance(name, str) and name:
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = {}
+            if isinstance(args, dict):
+                return {"id": obj.get("id", "synth-0"), "name": name, "args": args}
+    return None
+
+
+async def stream_chat_async(
+    *,
+    provider: str,
+    api_key: str,
+    model: str,
+    base_url: str,
+    system: str,
+    messages: list[dict[str, Any]],
+    tools: Optional[list[dict[str, Any]]] = None,
+    thinking_budget: Optional[int] = None,
+    max_tokens: int = 4096,
+) -> AsyncIterator[dict[str, Any]]:
+    """Unified async streaming with typed chunks.
+
+    Unlike the sync stream_chat above, this does NOT prepend the legacy
+    SYSTEM_PROMPT - the caller (AgenticLoop) owns the full system prompt
+    because tool taxonomy differs.
+    """
+    engine = resolve_engine(provider)
+    resolved_base = resolve_base_url(provider, base_url or None)
+
+    if engine == "anthropic":
+        async for chunk in stream_anthropic_async(
+            api_key=api_key,
+            model=model,
+            base_url=resolved_base,
+            system=system,
+            messages=messages,
+            tools=tools,
+            thinking_budget=thinking_budget,
+            max_tokens=max_tokens,
+        ):
+            yield chunk
+        return
+    if engine == "openai":
+        async for chunk in stream_openai_async(
+            api_key=api_key,
+            model=model,
+            base_url=resolved_base,
+            system=system,
+            messages=messages,
+            tools=tools,
+            max_tokens=max_tokens,
+        ):
+            yield chunk
+        return
+    yield {"kind": "error", "error": f"Unknown engine for provider {provider!r}: {engine}"}
+    yield {"kind": "stop", "reason": "error"}
