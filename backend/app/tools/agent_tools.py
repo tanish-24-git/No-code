@@ -76,6 +76,7 @@ def _session_artifact(session_id: str, key: str) -> Any:
 async def probe_hardware(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     from app.agents.hardware_analysis import HardwareAnalysisAgent
     agent = HardwareAnalysisAgent(ctx.bus)
+    agent.silent = True
     ev = AgentEvent(
         session_id=ctx.session_id, kind="DatasetProfileCompleted",
         actor="AgenticLoop", payload={},
@@ -97,6 +98,7 @@ async def profile_dataset(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
     if not s or not s.dataset_id:
         return {"error": "no dataset bound to session"}
     agent = DatasetProfilingAgent(ctx.bus)
+    agent.silent = True
     ev = AgentEvent(
         session_id=ctx.session_id, kind="IntakeCompleted",
         actor="AgenticLoop", payload={"dataset_id": s.dataset_id},
@@ -119,6 +121,7 @@ async def grade_data_health(args: dict[str, Any], ctx: ToolContext) -> dict[str,
         return {"error": "session not found"}
     profile = (s.artifacts or {}).get("profile") or {}
     agent = DataAlchemistAgent(ctx.bus)
+    agent.silent = True
     ev = AgentEvent(
         session_id=ctx.session_id, kind="DatasetProfileCompleted",
         actor="AgenticLoop", payload={"dataset_id": s.dataset_id, "profile": profile},
@@ -136,6 +139,7 @@ async def grade_data_health(args: dict[str, Any], ctx: ToolContext) -> dict[str,
 async def infer_task_type(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     from app.agents.task_inference import TaskInferenceAgent
     agent = TaskInferenceAgent(ctx.bus)
+    agent.silent = True
     ev = AgentEvent(
         session_id=ctx.session_id, kind="HardwareProfileCompleted",
         actor="AgenticLoop", payload={},
@@ -224,6 +228,7 @@ async def build_pipeline(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
 async def run_training(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     from app.agents.execution import ExecutionAgent
     agent = ExecutionAgent(ctx.bus)
+    agent.silent = True
     ev = AgentEvent(
         session_id=ctx.session_id, kind="PipelineApproved",
         actor="AgenticLoop", payload={},
@@ -243,6 +248,7 @@ async def run_training(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]
 async def evaluate_model(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     from app.agents.evaluation import EvaluationAgent
     agent = EvaluationAgent(ctx.bus)
+    agent.silent = True
     ev = AgentEvent(
         session_id=ctx.session_id, kind="TrainingCompleted",
         actor="AgenticLoop", payload={},
@@ -272,6 +278,7 @@ async def export_artifact(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
     repo_id = args.get("repo_id")
     name = args.get("name")
     agent = ExportAgent(ctx.bus)
+    agent.silent = True
 
     if target in ("local", "both"):
         ev = AgentEvent(

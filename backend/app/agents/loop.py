@@ -32,11 +32,7 @@ import logging
 from typing import Any, Optional
 
 from app.agents.base import BaseAgent
-from app.agents.prompts import (
-    AGENTIC_SYSTEM_PROMPT,
-    GREETING_MESSAGE,
-    INTAKE_ACK_TEMPLATE,
-)
+from app.agents.prompts import AGENTIC_SYSTEM_PROMPT
 from app.agents.providers import stream_chat_async
 from app.events.bus import EventBus
 from app.events.types import AgentEvent
@@ -94,7 +90,9 @@ class AgenticLoop(BaseAgent):
         sid = event.session_id
 
         if event.kind == "SessionStarted":
-            await self.emit_message(sid, GREETING_MESSAGE, parent=event.id)
+            # Start silent. The first IntakeCompleted (auto on upload) or
+            # UserMessage will wake the loop, and its first LLM turn will
+            # produce contextual narration from the state summary.
             return
 
         if event.kind == "UserMessage":
@@ -150,11 +148,6 @@ class AgenticLoop(BaseAgent):
             await self.emit_error(sid, f"AgenticLoop crashed: {e}")
 
     async def _run_loop(self, sid: str, *, parent_event_id: Optional[str]) -> None:
-        # On startup: if intake-ack hasn't been posted for this session yet
-        # but a dataset exists, post a brief ack so the user knows we are
-        # paying attention.
-        await self._maybe_post_intake_ack(sid, parent_event_id)
-
         # Drain any queued user messages and weave them into a synthetic
         # "since last turn" user message for the first turn.
         inbox = self._inbox.setdefault(sid, asyncio.Queue())
@@ -404,23 +397,6 @@ class AgenticLoop(BaseAgent):
             payload={"section": "interrupt", "agent": self.name,
                      "note": "user message received; replanning"},
         )
-
-    async def _maybe_post_intake_ack(self, sid: str, parent: Optional[str]) -> None:
-        session = self.get_session(sid)
-        if not session or not session.dataset_id:
-            return
-        if (session.artifacts or {}).get("loop_intake_ack_posted"):
-            return
-        ds = dataset_service.get_dataset(session.dataset_id)
-        if not ds:
-            return
-        text = INTAKE_ACK_TEMPLATE.format(
-            dataset_name=ds.name,
-            row_count=ds.row_count,
-            kind=(ds.analysis or {}).get("kind", "unknown"),
-        )
-        await self.emit_message(sid, text, parent=parent)
-        session_service.attach_artifact(session, "loop_intake_ack_posted", True)
 
 
 # ── Module-level helpers ──────────────────────────────────────────────────

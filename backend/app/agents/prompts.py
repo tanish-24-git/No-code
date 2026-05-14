@@ -45,21 +45,3 @@ Working rules:
 Output: one short paragraph per turn, then the tool call. Do not
 re-paste large tool results - the user already saw the tool event.
 """
-
-
-GREETING_MESSAGE = (
-    "FineTune Studio online. I am your autonomous fine-tuning engineer. "
-    "Upload a dataset (any format: CSV, JSON, JSONL, PDF, DOCX, mixed "
-    "folders, anything) and tell me what you want to do with it. I will "
-    "profile the data, probe your hardware, search for a good base model, "
-    "and draft a training pipeline. You stay in control - I propose, you "
-    "approve, and you can redirect me at any time."
-)
-
-
-INTAKE_ACK_TEMPLATE = (
-    "Got the dataset: {dataset_name} ({row_count} rows, kind: {kind}). "
-    "Tell me what you want to do with it, and I will start planning. "
-    "If you do not specify, I will assume a general instruction-tuning "
-    "goal and propose a plan you can revise."
-)
