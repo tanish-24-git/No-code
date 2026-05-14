@@ -157,21 +157,52 @@ def list_descriptors() -> list[dict[str, Any]]:
     ]
 
 
-def llm_tool_schemas() -> list[dict[str, Any]]:
-    """The tools formatted for the LLM tool-use protocol.
+# Tools exposed to the AgenticLoop by name. The registry contains many
+# legacy tools (dataset.*, model.*, alchemy.*, ...) that are called
+# internally by wrapped agents; the loop should only see high-level
+# composite tools, otherwise the tool-schema overhead exhausts the
+# provider's tokens-per-minute budget on rate-limited free tiers.
+_AGENT_LOOP_TOOLS: tuple[str, ...] = (
+    "probe_hardware",
+    "profile_dataset",
+    "grade_data_health",
+    "infer_task_type",
+    "select_base_model",
+    "propose_training_strategy",
+    "build_pipeline",
+    "run_training",
+    "evaluate_model",
+    "export_artifact",
+    "propose_plan",
+    "ask_user",
+    "record_decision",
+    "walk_session_uploads",
+    "extract_raw_text",
+    "synthesize_unified_dataset",
+    "search_hf_models",
+    "web_search",
+    "web_fetch",
+)
 
-    Anthropic-style (compatible with both Anthropic and OpenAI clients when
-    translated). The AgenticLoop calls this once per turn and passes the
-    result through to providers.stream_chat_async.
+
+def llm_tool_schemas() -> list[dict[str, Any]]:
+    """Tools exposed to the AgenticLoop's tool-use channel.
+
+    Filtered to high-level composite tools only - the wrapped specialty
+    agents' internal helpers (dataset.profile_tokens, model.search_hf,
+    etc.) stay hidden so the per-turn schema budget stays tight.
     """
-    return [
-        {
+    out: list[dict[str, Any]] = []
+    for name in _AGENT_LOOP_TOOLS:
+        t = REGISTRY.get(name)
+        if t is None:
+            continue
+        out.append({
             "name": t.name,
             "description": t.description,
             "input_schema": t.input_schema,
-        }
-        for t in REGISTRY.values()
-    ]
+        })
+    return out
 
 
 def _safe_json(value: Any) -> str:

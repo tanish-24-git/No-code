@@ -94,27 +94,12 @@ async def _tavily_search(query: str, max_results: int) -> dict[str, Any]:
 
 @tool(
     name="web_search",
-    description=(
-        "Search the open web for current information. Use when the user's "
-        "hardware, base model, dataset shape, or task is unusual, or when "
-        "you need recent best-practice recipes (papers, model cards, "
-        "blog posts). Returns up to max_results items with title, url, "
-        "and snippet. Backend is DuckDuckGo unless TAVILY_API_KEY is set."
-    ),
+    description="Search the web (DDG or Tavily). Use for current best practices, model cards, papers.",
     input_schema={
         "type": "object",
         "properties": {
-            "query": {
-                "type": "string",
-                "description": "Specific natural-language query. Include model names, hardware, year for recency.",
-            },
-            "max_results": {
-                "type": "integer",
-                "description": "How many results to return (1-10). Default 5.",
-                "default": 5,
-                "minimum": 1,
-                "maximum": 10,
-            },
+            "query": {"type": "string"},
+            "max_results": {"type": "integer"},
         },
         "required": ["query"],
     },
@@ -141,16 +126,10 @@ _USER_AGENT = "FineTuneStudio/1.0 (+https://github.com)"
 
 @tool(
     name="web_fetch",
-    description=(
-        "Fetch a URL and return its main text content. Strips scripts, "
-        "ads, navigation, and boilerplate. Capped at 8000 characters. "
-        "Use after web_search to read a promising result in depth."
-    ),
+    description="Fetch a URL and return its main text (max 8000 chars). Use after web_search.",
     input_schema={
         "type": "object",
-        "properties": {
-            "url": {"type": "string", "description": "Absolute http(s) URL."},
-        },
+        "properties": {"url": {"type": "string"}},
         "required": ["url"],
     },
     side_effect="external",

@@ -211,7 +211,7 @@ class AgenticLoop(BaseAgent):
                     system=system_prompt,
                     messages=messages,
                     tools=tools,
-                    max_tokens=4096,
+                    max_tokens=1536,
                 ):
                     kind = chunk.get("kind")
                     if kind == "thinking":
@@ -229,7 +229,18 @@ class AgenticLoop(BaseAgent):
                             "args": chunk.get("args") or {},
                         })
                     elif kind == "error":
-                        await self.emit_error(sid, f"LLM stream error: {chunk.get('error')}")
+                        err = str(chunk.get("error") or "")
+                        if "rate_limit" in err.lower() or "tokens per minute" in err.lower() or "tpm" in err.lower():
+                            await self.emit_message(
+                                sid,
+                                "The LLM provider rejected the request because it "
+                                "exceeded the per-minute token budget. Wait ~60s and "
+                                "send a message to continue, or switch to a model with "
+                                "a higher TPM tier in Settings.",
+                                parent=parent_event_id,
+                            )
+                        else:
+                            await self.emit_error(sid, f"LLM stream error: {err}")
                     elif kind == "stop":
                         stop_reason = chunk.get("reason", "stop")
             except asyncio.CancelledError:

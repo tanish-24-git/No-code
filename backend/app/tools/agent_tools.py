@@ -69,11 +69,7 @@ def _session_artifact(session_id: str, key: str) -> Any:
 
 @tool(
     name="probe_hardware",
-    description=(
-        "Detect the local hardware (CPU/GPU device, VRAM, RAM) and write "
-        "the result to the session's `hardware` artifact. Use early to "
-        "ground all later decisions about model size and training method."
-    ),
+    description="Detect local device/VRAM/RAM. Writes `hardware` artifact.",
     input_schema={"type": "object", "properties": {}},
     side_effect="read",
 )
@@ -90,12 +86,7 @@ async def probe_hardware(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
 
 @tool(
     name="profile_dataset",
-    description=(
-        "Compute the numeric profile of the current dataset: token length "
-        "distribution, exact-row duplicates, missing values per column, "
-        "and class imbalance. Writes the `profile` artifact. Call before "
-        "model selection so the model gets dataset shape context."
-    ),
+    description="Token lengths, duplicates, missing, imbalance. Writes `profile`.",
     input_schema={"type": "object", "properties": {}},
     side_effect="read",
 )
@@ -116,11 +107,7 @@ async def profile_dataset(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
 
 @tool(
     name="grade_data_health",
-    description=(
-        "After profile_dataset, run the Data Alchemist verdict: healthy / "
-        "advisory / needs_attention / blocking, with notes. Writes "
-        "`data_health` artifact."
-    ),
+    description="Data-health verdict (healthy/advisory/needs_attention/blocking). Writes `data_health`.",
     input_schema={"type": "object", "properties": {}},
     side_effect="read",
 )
@@ -142,13 +129,7 @@ async def grade_data_health(args: dict[str, Any], ctx: ToolContext) -> dict[str,
 
 @tool(
     name="infer_task_type",
-    description=(
-        "Classify the dataset's fine-tuning task type (instruction / chat / "
-        "qa / classification / language_modeling / ...). Requires that "
-        "profile_dataset and probe_hardware have already run. Reads global "
-        "directives so user goal statements influence the classification. "
-        "Writes `task_inference` artifact."
-    ),
+    description="Classify task type (instruction/chat/qa/classification/lm). Needs profile+hardware first. Writes `task_inference`.",
     input_schema={"type": "object", "properties": {}},
     side_effect="read",
 )
@@ -169,13 +150,7 @@ async def infer_task_type(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
 
 @tool(
     name="select_base_model",
-    description=(
-        "Search HuggingFace Hub for candidate base models that fit the "
-        "current hardware + task. Emits a model_search phase with the "
-        "shortlist and waits for the user to approve or pick a specific "
-        "model. Writes `chosen_model` artifact. Honors any user directive "
-        "like 'use llama' captured in earlier phases."
-    ),
+    description="HF search + rank + user-approval card. Writes `chosen_model`. Honors family/size hints from directives.",
     input_schema={"type": "object", "properties": {}},
     side_effect="external",
     interactive=True,
@@ -195,12 +170,7 @@ async def select_base_model(args: dict[str, Any], ctx: ToolContext) -> dict[str,
 
 @tool(
     name="propose_training_strategy",
-    description=(
-        "Design the training strategy (LoRA/QLoRA/DoRA + Unsloth + GaLore "
-        "+ Liger + precision + epochs/lr/batch). Emits a strategy phase "
-        "and waits for user approval or comment. Writes `strategy` and "
-        "`runtime_estimate` artifacts. Requires chosen_model first."
-    ),
+    description="Pick LoRA/QLoRA/DoRA + Unsloth/GaLore/Liger + epochs/lr/batch with approval card. Needs chosen_model. Writes `strategy`, `runtime_estimate`.",
     input_schema={"type": "object", "properties": {}},
     side_effect="read",
     interactive=True,
@@ -220,12 +190,7 @@ async def propose_training_strategy(args: dict[str, Any], ctx: ToolContext) -> d
 
 @tool(
     name="build_pipeline",
-    description=(
-        "Assemble the concrete pipeline (config + node graph) from the "
-        "chosen model + strategy + profile. Emits a plan phase, waits for "
-        "user approval or comment. Writes the pipeline to disk and "
-        "session.pipeline_id."
-    ),
+    description="Assemble pipeline (config+graph) from chosen_model+strategy+profile, with approval card. Sets session.pipeline_id.",
     input_schema={"type": "object", "properties": {}},
     side_effect="write_resource",
     interactive=True,
@@ -250,12 +215,7 @@ async def build_pipeline(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
 
 @tool(
     name="run_training",
-    description=(
-        "Launch the actual fine-tuning job for the assembled pipeline. "
-        "Streams metric events to the user as they arrive. Long-running "
-        "and cancel-UNSAFE: user interrupts during training are queued "
-        "and processed after the job completes. Writes session.job_id."
-    ),
+    description="Launch the fine-tuning job. Long-running, cancel-unsafe (interrupts queue). Sets session.job_id.",
     input_schema={"type": "object", "properties": {}},
     side_effect="write_resource",
     cost_class="expensive",
@@ -276,11 +236,7 @@ async def run_training(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]
 
 @tool(
     name="evaluate_model",
-    description=(
-        "Run the basic evaluation suite on the trained adapter and "
-        "compare to baseline. Writes `evaluation` artifact. Requires a "
-        "completed training job."
-    ),
+    description="Run eval suite + baseline compare on trained adapter. Writes `evaluation`. Needs completed job.",
     input_schema={"type": "object", "properties": {}},
     side_effect="read",
 )
@@ -297,17 +253,13 @@ async def evaluate_model(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
 
 @tool(
     name="export_artifact",
-    description=(
-        "Finalize the trained model. target must be 'local', 'hf', or "
-        "'both'. For 'hf' or 'both', repo_id is required. Cancel-unsafe; "
-        "user messages during export are queued."
-    ),
+    description="Save trained model. target=local|hf|both. repo_id required for hf/both. Cancel-unsafe.",
     input_schema={
         "type": "object",
         "properties": {
             "target": {"type": "string", "enum": ["local", "hf", "both"]},
-            "repo_id": {"type": "string", "description": "HuggingFace repo id, required for hf/both"},
-            "name": {"type": "string", "description": "Local model name (optional)"},
+            "repo_id": {"type": "string"},
+            "name": {"type": "string"},
         },
         "required": ["target"],
     },
@@ -345,28 +297,14 @@ async def export_artifact(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
 
 @tool(
     name="propose_plan",
-    description=(
-        "Show the user an ordered execution plan and wait for them to "
-        "Approve or Comment. Use BEFORE any irreversible action - "
-        "training, export, HF push. Returns {approved: True} on approve "
-        "or {approved: False, comment: ...} when the user comments. The "
-        "comment is also recorded as a global directive every future "
-        "turn must respect."
-    ),
+    description="Show user a plan card; wait for Approve or Comment. Comments become global directives.",
     input_schema={
         "type": "object",
         "properties": {
-            "phase": {
-                "type": "string",
-                "description": "A short slug for this plan (e.g. 'training', 'data_synthesis'). Used to namespace approvals.",
-            },
-            "title": {"type": "string", "description": "Short title shown on the plan card."},
-            "summary": {"type": "string", "description": "One-paragraph summary explaining the plan."},
-            "steps": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Ordered list of concrete steps (5-10 items).",
-            },
+            "phase": {"type": "string"},
+            "title": {"type": "string"},
+            "summary": {"type": "string"},
+            "steps": {"type": "array", "items": {"type": "string"}},
         },
         "required": ["phase", "title", "summary", "steps"],
     },
@@ -397,27 +335,14 @@ async def propose_plan(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]
 
 @tool(
     name="ask_user",
-    description=(
-        "Ask the user a single clarifying question. kind controls the UI: "
-        "'text' for free text, 'single_choice' or 'multi_choice' with a "
-        "list of choices, 'yes_no' for boolean. The tool blocks until the "
-        "user answers."
-    ),
+    description="Ask one clarifying question. Blocks until answered.",
     input_schema={
         "type": "object",
         "properties": {
             "question": {"type": "string"},
-            "kind": {
-                "type": "string",
-                "enum": ["text", "single_choice", "multi_choice", "yes_no"],
-                "default": "text",
-            },
-            "choices": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Required for single_choice / multi_choice.",
-            },
-            "impact": {"type": "string", "enum": ["low", "medium", "high"], "default": "medium"},
+            "kind": {"type": "string", "enum": ["text", "single_choice", "multi_choice", "yes_no"]},
+            "choices": {"type": "array", "items": {"type": "string"}},
+            "impact": {"type": "string", "enum": ["low", "medium", "high"]},
         },
         "required": ["question"],
     },
@@ -480,18 +405,14 @@ async def ask_user(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
 
 @tool(
     name="record_decision",
-    description=(
-        "Append a decision and rationale to the audit log. Use after "
-        "non-trivial choices so the audit trail is complete. Returns "
-        "the decision_id."
-    ),
+    description="Log a decision + rationale to the audit trail.",
     input_schema={
         "type": "object",
         "properties": {
-            "kind": {"type": "string", "description": "Short label (e.g. 'data_strategy', 'model_choice')."},
-            "chosen": {"description": "The chosen option (string or dict)."},
+            "kind": {"type": "string"},
+            "chosen": {},
             "rationale": {"type": "string"},
-            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            "confidence": {"type": "number"},
         },
         "required": ["kind", "chosen", "rationale"],
     },
@@ -517,12 +438,7 @@ async def record_decision(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
 
 @tool(
     name="walk_session_uploads",
-    description=(
-        "List all uploaded files for the current session as a flat list "
-        "of paths, recursive. Returns each file with kind sniffed from "
-        "content (pdf/docx/html/csv/json/jsonl/text/binary). Use before "
-        "synthesize_unified_dataset to know what raw material exists."
-    ),
+    description="List uploaded files for the session with content-sniffed kind.",
     input_schema={"type": "object", "properties": {}},
     side_effect="read",
 )
@@ -562,11 +478,7 @@ async def walk_session_uploads(args: dict[str, Any], ctx: ToolContext) -> dict[s
 
 @tool(
     name="extract_raw_text",
-    description=(
-        "Extract clean text from a single uploaded file at `path`. "
-        "Handles PDF, DOCX, HTML, plain text. Returns the extracted text "
-        "or an error if the file is binary / unreadable."
-    ),
+    description="Extract clean text from one file (PDF/DOCX/HTML/text).",
     input_schema={
         "type": "object",
         "properties": {"path": {"type": "string"}},
@@ -587,33 +499,16 @@ async def extract_raw_text(args: dict[str, Any], ctx: ToolContext) -> dict[str, 
 
 @tool(
     name="synthesize_unified_dataset",
-    description=(
-        "Take the existing raw dataset (any kind - folder, PDF, mixed "
-        "files) and synthesize a unified instruction/output (or chat) "
-        "dataset. This is the 'crap-to-trainable' tool. Internally walks "
-        "all files, extracts text, chunks it, asks the LLM to project "
-        "into the target format, and registers the result as a new "
-        "structured dataset. The session is re-bound to the new dataset. "
-        "Use only when the current dataset is raw_doc - call walk_session_uploads "
-        "first if unsure."
-    ),
+    description="Convert raw_doc upload (PDF/folder/mixed) into a structured training dataset; re-binds session. Use only on raw_doc.",
     input_schema={
         "type": "object",
         "properties": {
-            "target_format": {
-                "type": "string",
-                "enum": ["instruction", "chat", "qa", "classification", "language_modeling"],
-                "default": "instruction",
-            },
-            "user_intent": {
-                "type": "string",
-                "description": "Optional context about the user's domain / goal (e.g. 'medical QA')",
-            },
+            "target_format": {"type": "string", "enum": ["instruction", "chat", "qa", "classification", "language_modeling"]},
+            "user_intent": {"type": "string"},
         },
     },
     side_effect="write_resource",
     cost_class="medium",
-    cancel_safe=True,
 )
 async def synthesize_unified_dataset(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     from app.agents.data_restructurer import DataRestructurerAgent
@@ -673,12 +568,7 @@ async def synthesize_unified_dataset(args: dict[str, Any], ctx: ToolContext) -> 
 
 @tool(
     name="search_hf_models",
-    description=(
-        "Search the HuggingFace Hub for candidate base models. Optional "
-        "filters: family (llama/qwen/mistral/...), size_b (target params "
-        "in billions), task ('instruction', 'chat', 'classification'). "
-        "Returns a ranked list."
-    ),
+    description="Search HuggingFace Hub. Filters: family, size_b, task.",
     input_schema={
         "type": "object",
         "properties": {
@@ -686,7 +576,7 @@ async def synthesize_unified_dataset(args: dict[str, Any], ctx: ToolContext) -> 
             "family": {"type": "string"},
             "size_b": {"type": "number"},
             "task": {"type": "string"},
-            "top_n": {"type": "integer", "default": 10},
+            "top_n": {"type": "integer"},
         },
     },
     side_effect="external",
