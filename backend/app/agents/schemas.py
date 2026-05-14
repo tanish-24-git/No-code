@@ -92,12 +92,21 @@ class ModelChoiceResolution(BaseModel):
 
 
 class StrategyChoice(BaseModel):
-    """TrainingStrategyAgent output."""
+    """TrainingStrategyAgent output.
+
+    v4.0 additions:
+        use_unsloth    — 2x-5x faster training via Unsloth FastModel
+        optimizer      — 'adamw' (default) | 'galore' | 'galore_q' | 'adam8bit'
+        use_liger      — Triton-optimized loss kernels for max throughput
+    """
     method: Literal["lora", "qlora", "dora", "full"] = "lora"
     adapter_variant: Literal["none", "dora", "galore"] = "none"
     precision: Literal["float16", "fp16", "bfloat16", "bf16", "float32", "fp32"] = "fp16"
     quantization: Literal["none", "int4", "int8", "4bit", "8bit"] = "none"
-    kernel_pack: Literal["standard", "unsloth"] = "standard"
+    kernel_pack: Literal["standard", "unsloth", "liger"] = "standard"
+    use_unsloth: bool = False
+    optimizer: Literal["adamw", "galore", "galore_q", "adam8bit"] = "adamw"
+    use_liger: bool = False
     batch_size: int = Field(1, ge=1, le=64)
     gradient_accumulation: int = Field(1, ge=1, le=64)
     max_seq_len: int = Field(512, ge=64, le=8192)

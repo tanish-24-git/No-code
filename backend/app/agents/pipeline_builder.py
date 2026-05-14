@@ -50,8 +50,8 @@ class PipelineBuilderAgent(BaseAgent):
             parent=event.id,
         )
 
-        # Try schema-validated LLM proposal first.
-        det_nodes, det_edges = self._build_graph(session.dataset_id, profile, strategy)
+        # The agent now relies entirely on its reasoning for graph design.
+        # Deterministic fallbacks have been decommissioned.
         proposal = await self.call_llm_typed(
             session_id,
             (
@@ -60,22 +60,24 @@ class PipelineBuilderAgent(BaseAgent):
                 f"Chosen model: {chosen_model.get('repo_id')}\n\n"
                 "Design the pipeline node graph. Use node types from "
                 "(dataset, preprocess, balance, split, train, evaluate, export). "
+                "The graph should be logically sound for the given task and hardware. "
                 "Return GraphProposal JSON."
             ),
             GraphProposal,
-            system="You are a SOTA pipeline architect. Output only valid JSON.",
+            system="You are an autonomous pipeline architect. Design the best execution graph for this run.",
             stream_thoughts=False,
             parent=event.id,
         )
-        if proposal and proposal.nodes:
-            graph = {
-                "nodes": [n.model_dump() for n in proposal.nodes],
-                "edges": [e.model_dump() for e in proposal.edges],
-            }
-            rationale = proposal.rationale
-        else:
-            graph = {"nodes": det_nodes, "edges": det_edges}
-            rationale = "deterministic graph computed from profile and strategy"
+
+        if not proposal or not proposal.nodes:
+            await self.emit_error(session_id, "AI failed to design a pipeline graph.")
+            return
+
+        graph = {
+            "nodes": [n.model_dump() for n in proposal.nodes],
+            "edges": [e.model_dump() for e in proposal.edges],
+        }
+        rationale = proposal.rationale
 
         # 1. Create pipeline.
         if not session.pipeline_id:
@@ -175,56 +177,29 @@ class PipelineBuilderAgent(BaseAgent):
         repo_id = model.get("repo_id")
         if not repo_id:
             raise ValueError("chosen_model has no repo_id - upstream selection failed")
+        # Every value is strictly taken from the strategy proposed by the AI architect.
         return {
             "project_name": f"auto-{session.id[:8]}",
             "dataset_id": session.dataset_id,
             "task_type": strategy.get("task_type") or "Chat",
             "training_method": strategy.get("method") or "lora",
             "base_model": repo_id,
-            "epochs": int(strategy.get("epochs") or 3),
-            "batch_size": int(strategy.get("batch_size") or 1),
-            "learning_rate": float(strategy.get("learning_rate") or 2e-4),
-            "max_seq_len": int(strategy.get("max_seq_len") or 1024),
-            "lora_rank": int(strategy.get("lora_rank") or 16),
-            "gradient_accumulation": int(strategy.get("gradient_accumulation") or 4),
-            "precision": strategy.get("precision") or "bf16",
-            "early_stopping": bool(strategy.get("early_stopping", True)),
+            "epochs": strategy.get("epochs", 1),
+            "batch_size": strategy.get("batch_size", 1),
+            "learning_rate": strategy.get("learning_rate", 2e-4),
+            "max_seq_len": strategy.get("max_seq_len", 512),
+            "lora_rank": strategy.get("lora_rank", 16),
+            "gradient_accumulation": strategy.get("gradient_accumulation", 1),
+            "precision": strategy.get("precision", "bf16"),
+            "early_stopping": strategy.get("early_stopping", True),
         }
 
     def _build_reasoning(self, model, strategy, profile) -> dict[str, str]:
         return {
-            "base_model": "; ".join(model.get("reasons", [])) or "top scored candidate",
-            "training_method": f"chosen by hardware fit: {strategy.get('method')}",
-            "precision": f"{strategy.get('precision')} per device support",
-            "max_seq_len": f"clipped to dataset p95 ({profile.get('p95')}) and model.max_pos",
-            "epochs": f"{strategy.get('epochs')} balances dataset size vs runtime",
-            "batch_size": f"{strategy.get('batch_size')}x{strategy.get('gradient_accumulation')} fits VRAM budget",
+            "base_model": "; ".join(model.get("reasons", [])) or "agent-selected candidate",
+            "training_method": f"chosen by agent reasoning: {strategy.get('method')}",
+            "precision": f"{strategy.get('precision')} per agent choice",
+            "max_seq_len": f"set by agent: {strategy.get('max_seq_len')}",
+            "epochs": f"{strategy.get('epochs')} determined by agent reasoning",
+            "batch_size": f"{strategy.get('batch_size')}x{strategy.get('gradient_accumulation')} determined by agent reasoning",
         }
-
-    def _build_graph(self, dataset_id, profile, strategy):
-        nodes = [
-            {"id": "dataset", "type": "dataset", "position": {"x": 40, "y": 80}, "data": {"dataset_id": dataset_id}},
-            {"id": "preprocess", "type": "preprocess", "position": {"x": 240, "y": 80}, "data": {}},
-        ]
-        edges = [{"id": "e1", "source": "dataset", "target": "preprocess"}]
-        prev = "preprocess"
-        x = 440
-        imb = (profile.get("imbalance") or {})
-        if imb.get("balanced") is False and imb.get("label_field"):
-            nodes.append({"id": "balance", "type": "balance", "position": {"x": x, "y": 80},
-                          "data": {"label_field": imb["label_field"], "strategy": "upsample"}})
-            edges.append({"id": f"e_{prev}_balance", "source": prev, "target": "balance"})
-            prev = "balance"
-            x += 200
-        nodes.append({"id": "split", "type": "split", "position": {"x": x, "y": 80}, "data": {"ratio": 0.9}})
-        edges.append({"id": f"e_{prev}_split", "source": prev, "target": "split"})
-        x += 200
-        nodes.append({"id": "train", "type": "train", "position": {"x": x, "y": 80}, "data": {}})
-        edges.append({"id": "e_split_train", "source": "split", "target": "train"})
-        x += 200
-        nodes.append({"id": "evaluate", "type": "evaluate", "position": {"x": x, "y": 80}, "data": {}})
-        edges.append({"id": "e_train_eval", "source": "train", "target": "evaluate"})
-        x += 200
-        nodes.append({"id": "export", "type": "export", "position": {"x": x, "y": 80}, "data": {}})
-        edges.append({"id": "e_eval_export", "source": "evaluate", "target": "export"})
-        return nodes, edges

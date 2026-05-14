@@ -67,6 +67,14 @@ class BaseAgent:
     # Sub-classes can declare which directive scope they read.
     directive_scope: str = "global"
 
+    # When True the agent's narrative chat helpers (emit_message,
+    # stream_message, and announce() with requires_approval=False) are
+    # suppressed. Artifact writes, decision_log, materialize_node,
+    # complete(), emit_error, and approval-gate announces are unaffected.
+    # The AgenticLoop sets this on wrapped sub-agents so the loop's own
+    # LLM is the only voice in the chat.
+    silent: bool = False
+
     def __init__(self, bus: EventBus) -> None:
         self.bus = bus
         # Tracks session IDs with an active handle() invocation. Keeps
@@ -127,7 +135,9 @@ class BaseAgent:
         await self.bus.publish(ev)
         return ev
 
-    async def emit_message(self, session_id: str, text: str, *, parent: Optional[str] = None) -> AgentEvent:
+    async def emit_message(self, session_id: str, text: str, *, parent: Optional[str] = None) -> Optional[AgentEvent]:
+        if self.silent:
+            return None
         return await self.emit(
             "AssistantMessage",
             session_id,
@@ -143,6 +153,8 @@ class BaseAgent:
         is_final: bool = False,
         parent: Optional[str] = None,
     ) -> None:
+        if self.silent:
+            return
         await self.emit(
             "AssistantMessage",
             session_id,
@@ -171,6 +183,10 @@ class BaseAgent:
         requires_approval: bool = False,
         parent: Optional[str] = None,
     ) -> None:
+        # Suppress narration-only phase cards in silent mode. Approval
+        # cards still fire so the user retains an interaction surface.
+        if self.silent and not requires_approval:
+            return
         plan = PhasePlan(
             phase=phase,
             title=title,
@@ -535,15 +551,16 @@ class BaseAgent:
         if not include_tools:
             tool_guard = (
                 "CRITICAL OUTPUT RULES (override all other instructions):\n"
-                "- You have NO tools. Do NOT emit tool calls, function calls, "
-                "browser_search, python, code interpreter, or any structured "
-                "tool invocation. The runtime has none registered and will "
-                "discard them.\n"
-                "- Do NOT include thinking blocks, <think> tags, or "
-                "deliberation prefixes. Output the final answer directly.\n"
+                "- No tools are registered for this call. Do NOT emit tool calls, "
+                "function calls, browser_search, python, code interpreter, or any "
+                "structured tool invocation. The runtime has none registered and "
+                "will discard them.\n"
+                "- Think out loud freely. Thinking blocks and deliberation are "
+                "welcome; the runtime streams them to the user.\n"
                 "- If asked for JSON, return EXACTLY ONE fenced "
-                "```json ... ``` block and nothing else.\n"
-                "- If asked for plain text, return one or two sentences max."
+                "```json ... ``` block after your thinking.\n"
+                "- If asked for plain text, return one or two sentences after "
+                "your thinking."
             )
             full_system = (full_system + "\n\n" if full_system else "") + tool_guard
 
@@ -579,7 +596,7 @@ class BaseAgent:
         schema: Type[T],
         *,
         system: str = "",
-        stream_thoughts: bool = False,
+        stream_thoughts: bool = True,
         include_context: bool = True,
         parent: Optional[str] = None,
         max_retries: int = 1,

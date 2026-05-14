@@ -45,6 +45,18 @@ class ToolDef:
     side_effect: SideEffect = "read"
     requires_approval: bool = False
     cost_class: CostClass = "cheap"
+    # AgenticLoop metadata:
+    # cancel_safe=True  - if the user interrupts mid-call, the runtime may
+    #                     cancel this tool with asyncio.CancelledError and
+    #                     return {"interrupted": True} to the model.
+    # cancel_safe=False - the call is wrapped in asyncio.shield so user
+    #                     interrupts are queued and processed when the tool
+    #                     returns. Use for training, export, HF push.
+    # interactive=True  - the tool will emit user-facing events (questions,
+    #                     plans) and may await user response. The loop must
+    #                     not treat a slow response as a stall.
+    cancel_safe: bool = True
+    interactive: bool = False
 
 
 REGISTRY: dict[str, ToolDef] = {}
@@ -59,11 +71,19 @@ def tool(
     side_effect: SideEffect = "read",
     requires_approval: bool = False,
     cost_class: CostClass = "cheap",
+    cancel_safe: bool = True,
+    interactive: bool = False,
 ) -> Callable[[Callable[..., Awaitable[dict[str, Any]]]], Callable[..., Awaitable[dict[str, Any]]]]:
-    """Decorator. Registers the function as a tool under `name`."""
+    """Decorator. Registers the function as a tool under `name`.
+
+    cancel_safe / interactive are honored by the AgenticLoop - see ToolDef.
+    """
     def deco(fn: Callable[..., Awaitable[dict[str, Any]]]):
         if name in REGISTRY:
-            raise RuntimeError(f"duplicate tool name: {name}")
+            # Re-registration is a no-op during dev reloads. We log and skip
+            # rather than raising so module re-imports don't crash startup.
+            log.debug("tool %s already registered; skipping duplicate", name)
+            return fn
         REGISTRY[name] = ToolDef(
             name=name,
             description=description,
@@ -73,6 +93,8 @@ def tool(
             side_effect=side_effect,
             requires_approval=requires_approval,
             cost_class=cost_class,
+            cancel_safe=cancel_safe,
+            interactive=interactive,
         )
         return fn
     return deco
@@ -128,9 +150,59 @@ def list_descriptors() -> list[dict[str, Any]]:
             "side_effect": t.side_effect,
             "requires_approval": t.requires_approval,
             "cost_class": t.cost_class,
+            "cancel_safe": t.cancel_safe,
+            "interactive": t.interactive,
         }
         for t in REGISTRY.values()
     ]
+
+
+# Tools exposed to the AgenticLoop by name. The registry contains many
+# legacy tools (dataset.*, model.*, alchemy.*, ...) that are called
+# internally by wrapped agents; the loop should only see high-level
+# composite tools, otherwise the tool-schema overhead exhausts the
+# provider's tokens-per-minute budget on rate-limited free tiers.
+_AGENT_LOOP_TOOLS: tuple[str, ...] = (
+    "probe_hardware",
+    "profile_dataset",
+    "grade_data_health",
+    "infer_task_type",
+    "select_base_model",
+    "propose_training_strategy",
+    "build_pipeline",
+    "run_training",
+    "evaluate_model",
+    "export_artifact",
+    "propose_plan",
+    "ask_user",
+    "record_decision",
+    "walk_session_uploads",
+    "extract_raw_text",
+    "synthesize_unified_dataset",
+    "search_hf_models",
+    "web_search",
+    "web_fetch",
+)
+
+
+def llm_tool_schemas() -> list[dict[str, Any]]:
+    """Tools exposed to the AgenticLoop's tool-use channel.
+
+    Filtered to high-level composite tools only - the wrapped specialty
+    agents' internal helpers (dataset.profile_tokens, model.search_hf,
+    etc.) stay hidden so the per-turn schema budget stays tight.
+    """
+    out: list[dict[str, Any]] = []
+    for name in _AGENT_LOOP_TOOLS:
+        t = REGISTRY.get(name)
+        if t is None:
+            continue
+        out.append({
+            "name": t.name,
+            "description": t.description,
+            "input_schema": t.input_schema,
+        })
+    return out
 
 
 def _safe_json(value: Any) -> str:

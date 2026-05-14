@@ -41,7 +41,16 @@
       "Bash(curl -s -o /dev/null -w \"/inference: %{http_code}\\\\n\" http://127.0.0.1:3000/inference)",
       "Bash(git check-ignore *)",
       "Bash(git checkout *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(python -c \"import sys; sys.path.insert\\(0, '.'\\); from app.events import types; from app.services import blackboard, checkpoint; from app.agents import base, audit, sandbox, alchemy, orchestrator; from app.tools import alchemy as ta, sandbox as ts, strategy as ss, recovery as rs; print\\('OK', len\\(ts.__doc__\\)\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python *)",
+      "Bash(PYTHONIOENCODING=utf-8 python -c ' *)",
+      "Bash(PYTHONIOENCODING=utf-8 python *)",
+      "Bash(git *)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\tanish.jagtap\\\\Desktop\\\\No-code\" -Recurse -File -Name)",
+      "Bash(Select-Object -First 50)",
+      "Bash(xargs basename -a)"
     ]
   }
 }

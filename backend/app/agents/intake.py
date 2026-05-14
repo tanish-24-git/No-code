@@ -30,31 +30,34 @@ class DatasetIntakeAgent(BaseAgent):
             await self.emit_error(session_id, "Missing dataset_id")
             return
 
-        # If the user uploaded a raw doc, the DataRestructurerAgent will
-        # produce a structured dataset and re-emit DatasetUploaded. Skip
-        # this run; we'll re-fire on the structured one.
         ds = dataset_service.get_dataset(dataset_id)
         if dataset_service.is_raw_doc(ds):
+            # Raw-doc uploads skip the structured inspection tools (they
+            # would fail). Just emit IntakeCompleted with a raw_doc flag
+            # so the AgenticLoop wakes up and runs
+            # synthesize_unified_dataset. The loop produces all narration.
+            await self.emit(
+                "IntakeCompleted",
+                session_id,
+                payload={
+                    "dataset_id": dataset_id,
+                    "raw_doc": True,
+                    "info": {
+                        "name": ds.name,
+                        "row_count": ds.row_count,
+                        "file_type": ds.file_type,
+                    },
+                    "field_buckets": {},
+                },
+                parent_event_id=event.id,
+            )
             return
 
         if session.state == FSMState.INIT:
             session_service.advance_state(session, FSMState.PROFILING, reason="intake started")
 
-        await self.announce(
-            session_id,
-            phase="intake",
-            title="Reading your dataset",
-            summary="Inspecting metadata, sampling rows, and bucketing columns by purpose.",
-            steps=[
-                "Read row count and column types",
-                "Sample 3 rows for sanity-check",
-                "Classify columns: instruction-like / input-like / output-like / label-like",
-            ],
-            outputs=["dataset_facts artifact"],
-            requires_approval=False,
-            parent=event.id,
-        )
-
+        # Keep the dataset node for the canvas view; skip the chat-bubble
+        # narration - the AgenticLoop owns the user-facing voice now.
         await self.materialize_node(
             session_id,
             {"id": "dataset", "type": "dataset", "position": {"x": 40, "y": 80},
@@ -78,46 +81,9 @@ class DatasetIntakeAgent(BaseAgent):
                 "field_buckets": buckets.get("field_buckets", {}),
             })
 
-        cols = info.get("column_names", [])
-        col_preview = ", ".join(f"`{c}`" for c in cols[:8]) + ("..." if len(cols) > 8 else "")
-        outcomes_msg = self._deterministic_outcomes(buckets.get("field_buckets", {}), info)
-
-        # If the LLM is configured, replace the outlook with an LLM-grade
-        # forecast. The shared-context block already includes user
-        # directives, so "convert to chat" said earlier flows through here.
-        llm_msg = await self.call_llm(
-            session_id,
-            (
-                f"Dataset sample: {sample.get('sample', [])}\n"
-                f"Columns: {cols}\n\n"
-                "In one tight sentence (no preamble), what fine-tuning "
-                "outcomes are most natural for this data?"
-            ),
-            system="You are an expert data strategist. Be concrete and brief.",
-            stream_thoughts=False,
-            parent=event.id,
-        )
-        if llm_msg.strip():
-            outcomes_msg = llm_msg.strip()
-
-        await self.emit_message(
-            session_id,
-            (
-                f"Got your dataset **{info.get('name')}** - {info.get('row_count')} rows, "
-                f"{len(cols)} columns ({col_preview}).\n\n"
-                f"**Engineering outlook:** {outcomes_msg}"
-            ),
-            parent=event.id,
-        )
-
-        await self.complete(
-            session_id,
-            phase="intake",
-            summary=f"{info.get('row_count', 0)} rows, {len(cols)} columns",
-            artifacts={"dataset_facts_keys": list((buckets.get("field_buckets") or {}).keys())},
-            parent=event.id,
-        )
-
+        # IntakeCompleted is the only chat-visible signal we still emit
+        # from here; the loop wakes on this and produces its own
+        # contextual narration on the first LLM turn.
         await self.emit(
             "IntakeCompleted",
             session_id,

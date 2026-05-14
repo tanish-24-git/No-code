@@ -1,5 +1,9 @@
 """TrainingStrategyAgent: picks method/precision/batch/seq_len/lr/epochs.
 
+v4.0 — Efficiency-First kernel. Prioritizes **Unsloth** for 2x-5x faster
+training and **GaLore** for memory-efficient 7B+ fine-tuning on consumer
+hardware (8GB-16GB VRAM). Supports Liger-Kernel Triton-optimized losses.
+
 Always honors any user directive captured upstream (e.g. "use 5 epochs",
 "prefer DoRA"). The LLM, when configured, proposes a strict-JSON
 StrategyChoice; we validate it. The deterministic fallback is computed
@@ -53,39 +57,44 @@ class TrainingStrategyAgent(BaseAgent):
             parent=event.id,
         )
 
-        # 1. Try the LLM with strict schema. Shared context already
-        # injects user directives so "use 5 epochs" is honored.
+        # The agent now relies entirely on its reasoning for strategy selection.
+        # Hardcoded fallbacks and heuristic tools have been decommissioned.
         llm_proposal = await self.call_llm_typed(
             session_id,
             (
                 f"Hardware: {hw}\nProfile: {profile}\nTask: {task}\n"
                 f"Model: {chosen_model.get('repo_id')} ({chosen_model.get('params_b')}B)\n"
                 f"Priority: {priority}\n\n"
-                "Choose a fine-tuning strategy. Honor any user directives "
-                "above. Use bf16 on CUDA when possible, fp16 on MPS, "
-                "fp32 only on CPU. For datasets < 5k rows prefer 3-5 "
-                "epochs, > 50k rows 1 epoch."
+                "Design the optimal fine-tuning strategy. You MUST follow these rules:\n\n"
+                "1. **UNSLOTH FIRST**: If the model architecture is supported by Unsloth "
+                "(LLaMA, Mistral, Gemma, Phi, Qwen families), set use_unsloth=true and "
+                "kernel_pack='unsloth'. This gives 2x-5x speedup at zero cost.\n\n"
+                "2. **GALORE FOR VRAM CONSTRAINTS**: If the model has 7B+ parameters and "
+                "available VRAM is ≤16GB, set optimizer='galore' or 'galore_q'. GaLore "
+                "projects gradients to a low-rank subspace, cutting optimizer memory by 65%%. "
+                "This enables 7B fine-tuning on 12GB VRAM without full 4-bit quantization.\n\n"
+                "3. **LIGER-KERNEL**: If CUDA is available, set use_liger=true for "
+                "Triton-optimized cross-entropy and RMS-norm — 20%% throughput gain.\n\n"
+                "4. **COMBINE TECHNIQUES**: For extreme VRAM constraints (≤12GB + 7B model), "
+                "use QLoRA + GaLore + Unsloth together. This is the industrial recipe.\n\n"
+                "5. Base your decision on the model architecture, VRAM constraints, and "
+                "dataset profile. Output ONLY the StrategyChoice JSON."
             ),
             StrategyChoice,
-            system="You are a SOTA MLOps architect. Output only valid JSON.",
+            system=(
+                "You are an autonomous MLOps architect specializing in efficient fine-tuning. "
+                "You prioritize Unsloth and GaLore for maximum training throughput on "
+                "consumer hardware. Design the best job for this model specimen."
+            ),
             stream_thoughts=False,
             parent=event.id,
         )
 
-        if llm_proposal is not None:
+        if llm_proposal:
             strategy = llm_proposal.model_dump()
         else:
-            # Deterministic fallback - computed, not hardcoded.
-            tool_out = await self.call_tool(
-                "strategy.choose",
-                {"model": chosen_model, "hardware": hw, "profile": profile,
-                 "task": task, "priority": priority},
-                session_id,
-            )
-            if "error" in tool_out:
-                await self.emit_error(session_id, tool_out["error"])
-                return
-            strategy = tool_out
+            await self.emit_error(session_id, "AI failed to design a strategy for this model.")
+            return
 
         # Apply directive overrides (LLM might have ignored them - we
         # belt-and-suspenders here).
@@ -99,10 +108,17 @@ class TrainingStrategyAgent(BaseAgent):
         est_min = float(runtime.get("estimated_minutes", 0.0))
 
         stack_bits = [strategy.get("method", "lora")]
+        if strategy.get("use_unsloth"):
+            stack_bits.append("+Unsloth")
         if strategy.get("adapter_variant") and strategy["adapter_variant"] != "none":
             stack_bits.append(f"+{strategy['adapter_variant'].upper()}")
+        if strategy.get("optimizer") and strategy["optimizer"] not in ("adamw",):
+            stack_bits.append(f"+{strategy['optimizer'].upper()}")
+        if strategy.get("use_liger"):
+            stack_bits.append("+Liger")
         if strategy.get("kernel_pack") and strategy["kernel_pack"] != "standard":
-            stack_bits.append(f"+{strategy['kernel_pack']}")
+            if "Unsloth" not in str(stack_bits):  # avoid duplicate
+                stack_bits.append(f"+{strategy['kernel_pack']}")
         if strategy.get("quantization") and strategy["quantization"] != "none":
             stack_bits.append(f"+{strategy['quantization']}")
         stack = " ".join(stack_bits)
@@ -210,6 +226,17 @@ class TrainingStrategyAgent(BaseAgent):
             strategy["quantization"] = "int4"
         if "unsloth" in text:
             strategy["kernel_pack"] = "unsloth"
+            strategy["use_unsloth"] = True
+        if "galore" in text:
+            strategy["optimizer"] = "galore"
+            strategy["adapter_variant"] = "galore"
+        if "galore_q" in text or "galore-q" in text:
+            strategy["optimizer"] = "galore_q"
+        if "liger" in text:
+            strategy["use_liger"] = True
+            strategy["kernel_pack"] = "liger"
+        if "adam8bit" in text or "8bit adam" in text:
+            strategy["optimizer"] = "adam8bit"
         m = re.search(r"lr\s*=?\s*([\d\.eE\-\+]+)", text)
         if m:
             try:

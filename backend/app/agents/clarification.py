@@ -27,56 +27,36 @@ class ClarificationAgent(BaseAgent):
         info = (session.artifacts.get("dataset_facts") or {}).get("info", {})
         cols = info.get("column_names", [])
 
-        # Deliberate on which question to ask next using the LLM.
-        from app.orchestration.catalog import CATALOG
-        catalog_desc = "\n".join([f"- {k}: {v.question} ({v.why})" for k, v in CATALOG.items()])
+        # The agent now generates free-form questions based on the context.
+        # No more hardcoded catalog.
+        from app.api.schemas.session import ClarificationQuestion
         
         prompt = (
             f"Missing information: {', '.join(missing)}\n"
-            f"Dataset columns: {', '.join(cols)}\n"
-            f"Question Catalog:\n{catalog_desc}\n\n"
-            "Which question should I ask next to proceed with the pipeline? "
-            "Return ONLY the question_id."
+            f"Dataset columns: {', '.join(cols)}\n\n"
+            "What is the single most important question to ask the user to proceed with the pipeline? "
+            "Output the question in ClarificationQuestion JSON format."
         )
         
-        qid = "q_user_goal"
-        if session.llm_provider:
-            try:
-                qid_raw = await self.call_llm(
-                    session_id,
-                    prompt,
-                    system="You are a data analyst. Pick the best question_id from the catalog to clarify user intent. Return ONLY the ID.",
-                    parent=event.id
-                )
-                qid = qid_raw.strip().strip("'").strip('"').split("\n")[0]
-                if qid not in CATALOG:
-                    qid = "q_user_goal"
-            except Exception:
-                pass
-
-        # Context for the question
-        ctx = f"I need to clarify the {qid.replace('q_', '')} to configure the pipeline correctly."
-        opts = cols if qid in ("q_target_field", "q_input_fields") else None
-
-        q_payload = await self.call_tool(
-            "clarify.ask",
-            {"question_id": qid, "options": opts, "context": ctx},
+        q = await self.call_llm_typed(
             session_id,
+            prompt,
+            ClarificationQuestion,
+            system="You are a data analyst. Generate a focused question to clarify user intent. Be concise.",
+            parent=event.id,
         )
 
-        if "error" in q_payload:
-            await self.emit_error(session_id, q_payload["error"])
+        if not q:
+            await self.emit_error(session_id, "AI failed to generate a clarifying question.")
             return
 
         # Persist as pending question + bump budget.
-        from app.api.schemas.session import ClarificationQuestion
-        q = ClarificationQuestion(**q_payload)
         session_service.set_pending_question(session, q)
 
         await self.emit(
             "UserClarificationRequested",
             session_id,
-            payload=q_payload,
+            payload=q.model_dump(mode="json"),
             parent_event_id=event.id,
         )
         await self.emit_message(session_id, q.question, parent=event.id)

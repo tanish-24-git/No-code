@@ -27,6 +27,8 @@ from app.tools import (  # noqa: F401
     sandbox,
     strategy,
     task,
+    # AgenticLoop additions:
+    web,
 )
 
 __all__ = ["REGISTRY", "ToolDef", "ToolContext", "tool", "get_tool", "run_tool"]
