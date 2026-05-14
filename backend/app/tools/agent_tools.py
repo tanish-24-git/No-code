@@ -390,14 +390,19 @@ async def propose_plan(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]
 
 @tool(
     name="ask_user",
-    description="Ask one clarifying question. Blocks until answered.",
+    description="Ask one clarifying question. Blocks until answered. kind is one of 'text' (default), 'single_choice', 'multi_choice', 'yes_no'.",
     input_schema={
+        # Permissive schema. Enums + null-unions are dropped here because
+        # Groq's strict tool-arg validator rejects the combination ("kind
+        # must be one of [text, ..., null]" trips the parser). The tool
+        # body coerces unknown kind/impact values back to sensible
+        # defaults, so the model can send any string here.
         "type": "object",
         "properties": {
             "question": {"type": "string"},
-            "kind": {"type": ["string", "null"], "enum": ["text", "single_choice", "multi_choice", "yes_no", None]},
-            "choices": {"type": ["array", "null"], "items": {"type": "string"}},
-            "impact": {"type": ["string", "null"], "enum": ["low", "medium", "high", None]},
+            "kind": {"type": "string"},
+            "choices": {"type": "array", "items": {"type": "string"}},
+            "impact": {"type": "string"},
         },
         "required": ["question"],
     },
@@ -413,9 +418,13 @@ async def ask_user(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     question = args.get("question") or ""
     if not question.strip():
         return {"error": "question is required"}
-    kind = args.get("kind") or "text"
+    # Coerce free-form values back to a safe enum. The schema is permissive
+    # so Groq accepts the tool call; we validate here at runtime.
+    raw_kind = (args.get("kind") or "text").strip().lower()
+    kind = raw_kind if raw_kind in ("text", "single_choice", "multi_choice", "yes_no") else "text"
     options = list(args.get("choices") or args.get("options") or [])
-    impact = args.get("impact") or "medium"
+    raw_impact = (args.get("impact") or "medium").strip().lower()
+    impact = raw_impact if raw_impact in ("low", "medium", "high") else "medium"
 
     qid = "q_" + uuid.uuid4().hex[:10]
     q = ClarificationQuestion(
@@ -564,12 +573,13 @@ async def extract_raw_text(args: dict[str, Any], ctx: ToolContext) -> dict[str, 
 
 @tool(
     name="synthesize_unified_dataset",
-    description="Convert raw_doc upload (PDF/folder/mixed) into a structured training dataset; re-binds session. Use only on raw_doc.",
+    description="Convert raw_doc upload (PDF/folder/mixed) into a structured training dataset; re-binds session. Use only on raw_doc. target_format defaults to 'instruction'; other values: chat, qa, classification, language_modeling.",
     input_schema={
+        # Drop enums to keep Groq's validator happy; the tool body coerces.
         "type": "object",
         "properties": {
-            "target_format": {"type": ["string", "null"], "enum": ["instruction", "chat", "qa", "classification", "language_modeling", None]},
-            "user_intent": {"type": ["string", "null"]},
+            "target_format": {"type": "string"},
+            "user_intent": {"type": "string"},
         },
     },
     side_effect="write_resource",
@@ -590,9 +600,12 @@ async def synthesize_unified_dataset(args: dict[str, Any], ctx: ToolContext) -> 
                 "row_count": ds.row_count}
 
     # Seed the restructurer's format directive so its approval gate uses
-    # what the model chose. The model already deliberated; we do not want
-    # to ask the user again unless they comment.
-    target = args.get("target_format") or "instruction"
+    # what the model chose. The schema accepts any string for
+    # target_format; we coerce here to a known set so downstream code
+    # never crashes on a misspelled value.
+    raw_target = (args.get("target_format") or "instruction").strip().lower()
+    _allowed_targets = {"instruction", "chat", "qa", "classification", "language_modeling"}
+    target = raw_target if raw_target in _allowed_targets else "instruction"
     user_intent = args.get("user_intent") or ""
     if user_intent:
         directives_service.record(

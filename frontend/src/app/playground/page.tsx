@@ -64,11 +64,24 @@ export default function PlaygroundPage() {
     }
   }, [sessions, activeSessionId]);
 
-  const { data: session } = useSWR<AgentSession>(
+  const { data: session, error: sessionError } = useSWR<AgentSession>(
     activeSessionId ? `/api/sessions/${activeSessionId}` : null,
     fetcher,
-    { refreshInterval: 1500 },
+    { refreshInterval: 1500, shouldRetryOnError: false },
   );
+
+  // If the persisted session ID points to a session that no longer exists
+  // (common after `docker compose down -v`), clear it so the auto-select
+  // effect can pick the next most recent session or fall back to empty.
+  useEffect(() => {
+    if (sessionError && activeSessionId) {
+      const msg = String((sessionError as Error)?.message ?? '');
+      if (msg.startsWith('404')) {
+        setActiveSessionId(null);
+        mutateSessions();
+      }
+    }
+  }, [sessionError, activeSessionId, mutateSessions]);
 
   const pipelineId = session?.pipeline_id;
   const { data: pipeline } = useSWR<Pipeline>(
