@@ -18,6 +18,7 @@ class DatasetIntakeAgent(BaseAgent):
     directive_scope = "data"
     allowed_tools = ("dataset.inspect", "dataset.read_sample", "dataset.summarize_fields", "audit.write")
     triggers = ("DatasetUploaded",)
+    tier_preference = "fast"  # first-pass narration of fields + sample rows
 
     async def handle(self, event: AgentEvent) -> None:
         session_id = event.session_id

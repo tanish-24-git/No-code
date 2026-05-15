@@ -18,6 +18,8 @@ class TaskInferenceAgent(BaseAgent):
     directive_scope = "data"
     allowed_tools = ("task.classify", "task.score_candidates", "audit.write")
     triggers = ("HardwareProfileCompleted", "GoalCaptured", "UserClarificationReceived")
+    # Classification over field-buckets — fast tier is sufficient.
+    tier_preference = "fast"
 
     async def handle(self, event: AgentEvent) -> None:
         session_id = event.session_id

@@ -14,6 +14,8 @@ class ClarificationAgent(BaseAgent):
     role = "Ask the smallest useful clarifying question; never invent free-form questions."
     allowed_tools = ("clarify.ask", "clarify.parse_reply", "audit.write")
     triggers = ("IntentConfidenceLow",)
+    # Single-question generation — fast tier comfortably handles it.
+    tier_preference = "fast"
 
     async def handle(self, event: AgentEvent) -> None:
         session_id = event.session_id

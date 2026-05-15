@@ -275,12 +275,31 @@ make this work are:
   prompt size flat across long runs — older turns collapse into a
   short note rather than accumulating until they break TPM.
 
-For heavier work, three knobs (all optional, all zero-config by default):
+A third system kicks in automatically once you have a model
+configured: **quality-aware tier routing**. The wrapped specialty
+agents (intake, profile, hardware, alchemy, restructure, classify,
+clarify) narrate mechanical facts and don't need your strong model
+for that — they auto-route to a cheaper same-provider sibling so the
+strategic decisions (training strategy, recovery, audit) get the
+quota your strong model needs. The substitution never upgrades your
+choice: if you picked Flash to save money, "strong" requests still
+return Flash.
+
+Practical effect on a free Gemini key configured to `gemini-2.5-pro`:
+intake / profile / hardware land on `gemini-2.0-flash-lite`
+(~1500 RPD free) and only the 2-3 strategic calls per session spend
+your 20 RPD Pro quota. Sessions-per-day on the same key goes from
+~2 to ~10.
+
+For heavier work or non-default behavior, the knobs (all optional,
+all zero-config):
 
 | Knob | Default | Purpose |
 | --- | --- | --- |
 | `GEMINI_API_KEYS=k1,k2,k3` (plural) | unset | Round-robin across multiple keys; each gets its own RPM/TPM bucket. Same shape works for any provider: `GROQ_API_KEYS`, `OPENROUTER_API_KEYS`, etc. A generic `LLM_API_KEYS` is also honored. |
 | `data/provider_limits.json` | auto-seeded on first run | Per-provider `rpm` / `tpm` / `min_interval_sec`. Edit any time; re-read on every reservation. |
+| `data/model_tiers.json` | auto-seeded on first run | Per-provider `fast` / `medium` / `strong` model IDs. Edit to point fast-tier at a different small model, or to add tier rows for providers not pre-seeded (OpenRouter, Together, Fireworks). |
+| `FT_AUTO_TIER_ROUTING` | `true` | Set to `false` to pin every call to your configured model (turns off tier auto-routing entirely). |
 | `FT_ROLLING_WINDOW_K` | `8` | How many recent assistant+tool-result pairs the loop keeps verbatim. Lower it to reduce TPM further; raise it for richer long-range context on bigger tiers. |
 | `FT_OBSERVATION_BUDGET` | `2000` | Per-tool-output character cap applied centrally in the registry. Tools that self-manage size (`web_fetch`, `extract_raw_text`) opt out. |
 | `TAVILY_API_KEY` | unset | If present, the web-search tool tries Tavily first (cleaner markdown, survives bot-detection) before the zero-config DuckDuckGo / Google / SearXNG / Wikipedia chain. |
