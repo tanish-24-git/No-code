@@ -50,7 +50,9 @@
       "Bash(git *)",
       "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\tanish.jagtap\\\\Desktop\\\\No-code\" -Recurse -File -Name)",
       "Bash(Select-Object -First 50)",
-      "Bash(xargs basename -a)"
+      "Bash(xargs basename -a)",
+      "Bash(Select-String -Pattern \"\\(registry|agent_tools|tool\\)\")",
+      "Bash(grep -i \"\\\\.py$\")"
     ]
   }
 }

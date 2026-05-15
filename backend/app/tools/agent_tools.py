@@ -559,6 +559,13 @@ async def walk_session_uploads(args: dict[str, Any], ctx: ToolContext) -> dict[s
         "required": ["path"],
     },
     side_effect="read",
+    # raw_extractor self-caps structured-file output at 200K chars; the
+    # registry middleware would otherwise truncate clean extracted text
+    # to 2000 chars, which defeats the point of this tool. The
+    # AgenticLoop also passes results through its own 1500-char-per-result
+    # cap when rendering observations, so the LLM still sees a tight
+    # summary per turn.
+    supports_full_output=True,
 )
 async def extract_raw_text(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     from app.services import raw_extractor
@@ -681,6 +688,52 @@ async def search_hf_models(args: dict[str, Any], ctx: ToolContext) -> dict[str, 
     return await _run("model.search_hf", payload, ctx)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# Recovery: AgenticLoop-facing wrapper around the existing
+# recovery.propose_plan tool. The loop can call this directly when a
+# training stub or downstream step reports an anomaly, instead of waiting
+# for the dedicated RecoveryAgent to react to a TrainingAnomalyDetected
+# event. Backs the existing /api/sessions/{id}/retry endpoint.
+# ══════════════════════════════════════════════════════════════════════════
+
+@tool(
+    name="propose_recovery",
+    description="Given a training/eval anomaly + current pipeline config, propose a config-diff to retry with. Returns operations + rationale + confidence.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "anomaly": {"type": "string"},
+            "config": {"type": "object"},
+            "extra_minutes": {"type": "number"},
+        },
+        "required": ["anomaly"],
+    },
+    side_effect="read",
+)
+async def propose_recovery(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    # Resolve the current pipeline config from the session if the caller
+    # did not pass one explicitly — keeps the LLM's call simple.
+    from app.services import pipeline_service, session_service
+    from app.tools.registry import run_tool as _run
+
+    cfg = args.get("config")
+    if not cfg:
+        s = session_service.get(ctx.session_id)
+        pipeline = (
+            pipeline_service.get(s.pipeline_id)
+            if s and getattr(s, "pipeline_id", None)
+            else None
+        )
+        cfg = pipeline.config.model_dump() if pipeline else {}
+    payload = {
+        "anomaly": args.get("anomaly") or "",
+        "config": cfg,
+        "extra_minutes": float(args.get("extra_minutes") or 5.0),
+    }
+    return await _run("recovery.propose_plan", payload, ctx)
+
+
 # Import side-effect: ensure web + dataset/hf tools are also loaded so the
 # AgenticLoop sees them on registry introspection.
 from app.tools import web as _web  # noqa: F401
+from app.tools import recovery as _recovery  # noqa: F401

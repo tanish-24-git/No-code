@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Literal, Optional
@@ -57,6 +58,14 @@ class ToolDef:
     #                     not treat a slow response as a stall.
     cancel_safe: bool = True
     interactive: bool = False
+    # supports_full_output=False (default): the central observation-budget
+    #     middleware in run_tool() will truncate string fields longer than
+    #     FT_OBSERVATION_BUDGET before the result reaches the LLM. Use this
+    #     for tools whose outputs the LLM never needs in full.
+    # supports_full_output=True: the tool already manages its own size
+    #     (web_fetch caps at 8000 chars; raw_extractor caps structured
+    #     output at 200K chars). The middleware leaves the result alone.
+    supports_full_output: bool = False
 
 
 REGISTRY: dict[str, ToolDef] = {}
@@ -73,10 +82,12 @@ def tool(
     cost_class: CostClass = "cheap",
     cancel_safe: bool = True,
     interactive: bool = False,
+    supports_full_output: bool = False,
 ) -> Callable[[Callable[..., Awaitable[dict[str, Any]]]], Callable[..., Awaitable[dict[str, Any]]]]:
     """Decorator. Registers the function as a tool under `name`.
 
     cancel_safe / interactive are honored by the AgenticLoop - see ToolDef.
+    supports_full_output bypasses the central observation-budget truncator.
     """
     def deco(fn: Callable[..., Awaitable[dict[str, Any]]]):
         if name in REGISTRY:
@@ -95,6 +106,7 @@ def tool(
             cost_class=cost_class,
             cancel_safe=cancel_safe,
             interactive=interactive,
+            supports_full_output=supports_full_output,
         )
         return fn
     return deco
@@ -107,6 +119,17 @@ def get_tool(name: str) -> Optional[ToolDef]:
 async def run_tool(name: str, args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     """Dispatch + audit. Emits AgentToolCalled with timing.
 
+    Wraps the tool body in two pieces of middleware:
+        Pre: strip None and empty-string values from args. Weaker models
+        (Groq's llama-3.3-70b, Gemini Flash) routinely emit ``"family":
+        null`` or ``"size_b": ""`` for optional fields; we drop them so
+        every tool body sees a clean dict.
+        Post: if the tool did not declare supports_full_output=True, walk
+        the result dict and truncate any string field longer than the
+        observation budget (default 2000 chars, tunable via
+        FT_OBSERVATION_BUDGET). Protects the LLM's context window from
+        runaway tool outputs across many turns.
+
     Returns a structured result dict; on failure returns {"error": ...} rather
     than raising, because tool failure is part of the agent control flow.
     """
@@ -114,9 +137,13 @@ async def run_tool(name: str, args: dict[str, Any], ctx: ToolContext) -> dict[st
     if not t:
         return {"error": f"unknown tool: {name}"}
 
+    cleaned_args = _strip_nulls_and_empties(args or {})
+
     started = time.perf_counter()
     try:
-        result = await t.fn(args or {}, ctx)
+        result = await t.fn(cleaned_args, ctx)
+        if not t.supports_full_output:
+            result = _apply_observation_budget(result, _observation_budget())
         ms = round((time.perf_counter() - started) * 1000, 1)
         if ctx.bus is not None:
             await ctx.bus.publish(AgentEvent(
@@ -152,6 +179,7 @@ def list_descriptors() -> list[dict[str, Any]]:
             "cost_class": t.cost_class,
             "cancel_safe": t.cancel_safe,
             "interactive": t.interactive,
+            "supports_full_output": t.supports_full_output,
         }
         for t in REGISTRY.values()
     ]
@@ -182,6 +210,7 @@ _AGENT_LOOP_TOOLS: tuple[str, ...] = (
     "search_hf_models",
     "web_search",
     "web_fetch",
+    "propose_recovery",
 )
 
 
@@ -207,3 +236,49 @@ def llm_tool_schemas() -> list[dict[str, Any]]:
 
 def _safe_json(value: Any) -> str:
     return json.dumps(value, default=str)
+
+
+# ── Central middleware helpers ──────────────────────────────────────────
+
+def _observation_budget() -> int:
+    try:
+        return max(200, int(os.getenv("FT_OBSERVATION_BUDGET", "2000")))
+    except ValueError:
+        return 2000
+
+
+def _strip_nulls_and_empties(args: dict[str, Any]) -> dict[str, Any]:
+    """Drop keys whose value is None or an empty string.
+
+    Weaker LLMs (Groq llama-3.3-70b, Gemini Flash) routinely emit null or
+    "" for unused optional parameters, then tool bodies that rely on
+    ``args.get("k")`` get unexpected falsy values that bypass their
+    defaults. Stripping here at the dispatcher means every tool body
+    sees a clean dict without having to patch each tool individually.
+    """
+    if not isinstance(args, dict):
+        return args
+    return {
+        k: v for k, v in args.items()
+        if v is not None and not (isinstance(v, str) and v == "")
+    }
+
+
+def _apply_observation_budget(result: Any, max_chars: int) -> Any:
+    """Recursively truncate string fields in ``result`` longer than
+    ``max_chars``. Non-string values pass through untouched. Designed to
+    be cheap and idempotent.
+
+    The marker ``...[truncated]`` makes the cap visible to the model so
+    it can ask for more (e.g. by re-calling with a different argument)
+    rather than assuming the field ended there.
+    """
+    if isinstance(result, str):
+        if len(result) > max_chars:
+            return result[:max_chars] + "...[truncated]"
+        return result
+    if isinstance(result, dict):
+        return {k: _apply_observation_budget(v, max_chars) for k, v in result.items()}
+    if isinstance(result, list):
+        return [_apply_observation_budget(v, max_chars) for v in result]
+    return result

@@ -29,13 +29,80 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any, AsyncIterator, Iterator, Optional
 
+from app.agents.rate_limiter import PROVIDER_GATE, estimate_prompt_tokens
 from app.agents.registry import resolve_base_url, resolve_engine
 from app.agents.tools import SYSTEM_PROMPT, TOOLS, run_tool
 
 
 log = logging.getLogger("finetune-studio.providers")
+
+# Round-robin counter per provider for opt-in multi-key rotation.
+# Keyed by canonical provider string ("gemini", "groq", ...). Lives at
+# module scope so the rotation persists across calls in the same process.
+_KEY_ROTATION_INDEX: dict[str, int] = {}
+
+
+def _candidate_env_vars(provider: str) -> list[str]:
+    """Env vars to consult for opt-in plural API keys, in priority order.
+
+    Derived from the provider name so adding a new provider in
+    registry.PROVIDERS does not require touching this file. A generic
+    LLM_API_KEYS fallback covers users who want a single rotated pool
+    regardless of which provider the session picks.
+    """
+    canon = (
+        (provider or "")
+        .upper()
+        .replace("-", "_")
+        .replace(".", "_")
+        .replace("/", "_")
+        .replace(" ", "_")
+    )
+    out: list[str] = []
+    if canon:
+        out.append(f"{canon}_API_KEYS")
+        if "_" in canon:
+            tail = canon.split("_")[-1]
+            if tail and tail != canon:
+                out.append(f"{tail}_API_KEYS")
+    out.append("LLM_API_KEYS")
+    return out
+
+
+def _read_multi_keys(provider: str) -> list[str]:
+    """Return the parsed list of keys from the first env var that has one.
+
+    Empty list means "no plural keys configured" — the caller should use
+    the singular api_key it already has.
+    """
+    for var in _candidate_env_vars(provider):
+        raw = os.environ.get(var, "").strip()
+        if not raw:
+            continue
+        keys = [k.strip() for k in raw.split(",") if k.strip()]
+        if keys:
+            return keys
+    return []
+
+
+def _resolve_api_key(provider: str, given_key: str) -> tuple[str, int]:
+    """Choose the API key + bucket index for this call.
+
+    If a plural env var is set, round-robin across it and return
+    (chosen_key, index). Otherwise return (given_key, 0). The index is
+    fed into the ProviderGate so each key gets its own RPM/TPM bucket
+    and three keys yield ~3x effective throughput.
+    """
+    keys = _read_multi_keys(provider)
+    if not keys:
+        return given_key, 0
+    canon = (provider or "").strip().lower()
+    idx = _KEY_ROTATION_INDEX.get(canon, 0) % len(keys)
+    _KEY_ROTATION_INDEX[canon] = (idx + 1) % len(keys)
+    return keys[idx], idx
 # Dedicated channel for diagnostic dumps when a provider rejects a
 # function/tool call. Quiet by default; grep for "failed_generation" in
 # docker logs after a Groq function-call validation error.
@@ -315,14 +382,27 @@ def stream_chat(
 ) -> Iterator[str]:
     """Look up the provider in the registry, resolve engine + base URL,
     and run the right streaming function. Tools and system prompt are
-    shared across engines."""
+    shared across engines.
+
+    All sync provider calls funnel through here, so this is where the
+    ProviderGate enforces RPM + TPM. Multi-key rotation (opt-in via
+    <PROVIDER>_API_KEYS) also happens here so every legacy call site
+    inherits both features without code changes.
+    """
     system = SYSTEM_PROMPT if not extra_system else SYSTEM_PROMPT + "\n\n" + extra_system
     engine = resolve_engine(provider)
     resolved_base = resolve_base_url(provider, base_url or None)
+    real_key, key_idx = _resolve_api_key(provider, api_key)
+    est = estimate_prompt_tokens(messages, system)
+    # Block until the per-provider gate grants a slot. The context
+    # manager exits immediately after the slot is granted; it does not
+    # hold a lock for the streaming call's duration.
+    with PROVIDER_GATE.reserve_sync(provider, est, key_idx):
+        pass
 
     if engine == "anthropic":
         yield from stream_anthropic(
-            api_key=api_key,
+            api_key=real_key,
             model=model,
             base_url=resolved_base,
             system=system,
@@ -332,7 +412,7 @@ def stream_chat(
         return
     if engine == "openai":
         yield from stream_openai(
-            api_key=api_key,
+            api_key=real_key,
             model=model,
             base_url=resolved_base,
             system=system,
@@ -603,13 +683,21 @@ async def stream_chat_async(
     Unlike the sync stream_chat above, this does NOT prepend the legacy
     SYSTEM_PROMPT - the caller (AgenticLoop) owns the full system prompt
     because tool taxonomy differs.
+
+    All async provider calls funnel through here, so this is where the
+    ProviderGate enforces RPM + TPM. Multi-key rotation (opt-in via
+    <PROVIDER>_API_KEYS) also happens here.
     """
     engine = resolve_engine(provider)
     resolved_base = resolve_base_url(provider, base_url or None)
+    real_key, key_idx = _resolve_api_key(provider, api_key)
+    est = estimate_prompt_tokens(messages, system)
+    async with PROVIDER_GATE.reserve_async(provider, est, key_idx):
+        pass
 
     if engine == "anthropic":
         async for chunk in stream_anthropic_async(
-            api_key=api_key,
+            api_key=real_key,
             model=model,
             base_url=resolved_base,
             system=system,
@@ -622,7 +710,7 @@ async def stream_chat_async(
         return
     if engine == "openai":
         async for chunk in stream_openai_async(
-            api_key=api_key,
+            api_key=real_key,
             model=model,
             base_url=resolved_base,
             system=system,
