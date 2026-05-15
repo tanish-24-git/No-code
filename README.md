@@ -262,6 +262,34 @@ npm run dev
 
 ---
 
+## Running on free-tier API keys
+
+The defaults are tuned to survive a single Gemini Flash free-tier key
+(5 RPM, 250k TPM) end-to-end on a small dataset. The two systems that
+make this work are:
+
+- A **provider rate-limit gate** that serializes every LLM HTTP call
+  (probe, intake, loop, recovery) per provider, so independent agents
+  cannot collectively burst past the cap.
+- A **rolling context window** in the AgenticLoop that keeps the
+  prompt size flat across long runs — older turns collapse into a
+  short note rather than accumulating until they break TPM.
+
+For heavier work, three knobs (all optional, all zero-config by default):
+
+| Knob | Default | Purpose |
+| --- | --- | --- |
+| `GEMINI_API_KEYS=k1,k2,k3` (plural) | unset | Round-robin across multiple keys; each gets its own RPM/TPM bucket. Same shape works for any provider: `GROQ_API_KEYS`, `OPENROUTER_API_KEYS`, etc. A generic `LLM_API_KEYS` is also honored. |
+| `data/provider_limits.json` | auto-seeded on first run | Per-provider `rpm` / `tpm` / `min_interval_sec`. Edit any time; re-read on every reservation. |
+| `FT_ROLLING_WINDOW_K` | `8` | How many recent assistant+tool-result pairs the loop keeps verbatim. Lower it to reduce TPM further; raise it for richer long-range context on bigger tiers. |
+| `FT_OBSERVATION_BUDGET` | `2000` | Per-tool-output character cap applied centrally in the registry. Tools that self-manage size (`web_fetch`, `extract_raw_text`) opt out. |
+| `TAVILY_API_KEY` | unset | If present, the web-search tool tries Tavily first (cleaner markdown, survives bot-detection) before the zero-config DuckDuckGo / Google / SearXNG / Wikipedia chain. |
+
+Heavier dataset, paid key, or a fleet of free keys — you only need to
+set what applies. Nothing here is mandatory.
+
+---
+
 ## HTTP API surface
 
 | Method | Path | Purpose |

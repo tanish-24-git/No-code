@@ -1,3 +1,4 @@
+
 """Web grounding tools: search the open web, fetch pages.
 
 User-facing contract: zero configuration. The only things the operator
@@ -43,6 +44,52 @@ _BUSY_RESPONSE: dict[str, Any] = {
     "error": "search_backend_unavailable",
     "advice": "the web search backend is busy; will try again on the next turn",
 }
+
+
+# ── Backend 0: Tavily (opt-in via TAVILY_API_KEY) ─────────────────────────
+#
+# Tavily returns cleaner markdown than scraped backends and survives
+# bot-detection that breaks DDG/Google when the server runs in a data
+# center. Skipped entirely when no key is set, so the zero-config
+# default chain below still works for users who do not opt in.
+
+async def _tavily_search(query: str, max_results: int) -> dict[str, Any]:
+    import os
+    key = os.environ.get("TAVILY_API_KEY", "").strip()
+    if not key:
+        return {"error": "not_configured"}
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=_BACKEND_TIMEOUT,
+                                     headers={"User-Agent": _USER_AGENT}) as client:
+            resp = await client.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": key,
+                    "query": query,
+                    "max_results": max_results,
+                    "search_depth": "basic",
+                },
+            )
+        if resp.status_code >= 400:
+            return {"error": f"tavily_http_{resp.status_code}"}
+        data = resp.json() or {}
+        hits = data.get("results") or []
+        out = [
+            {
+                "title": h.get("title", "") or "",
+                "url": h.get("url", "") or "",
+                "snippet": h.get("content", "") or "",
+            }
+            for h in hits[:max_results]
+            if h.get("url")
+        ]
+        if out:
+            return {"backend": "tavily", "results": out}
+        return {"error": "tavily_empty"}
+    except Exception as e:
+        log.info("tavily search failed: %s", e)
+        return {"error": "tavily_failed", "_detail": str(e)}
 
 
 # ── Backend 1: DuckDuckGo ─────────────────────────────────────────────────
@@ -226,6 +273,7 @@ async def _wikipedia_search(query: str, max_results: int) -> dict[str, Any]:
 
 BackendFn = Callable[[str, int], Awaitable[dict[str, Any]]]
 _BACKENDS: tuple[BackendFn, ...] = (
+    _tavily_search,           # opt-in; silent no-op when TAVILY_API_KEY is unset
     _ddg_search,
     _googlesearch_search,
     _searxng_search,
@@ -290,6 +338,9 @@ _MAX_CHARS = 8000
     },
     side_effect="external",
     cost_class="cheap",
+    # The body already caps the extracted text at 8000 chars and reports
+    # ``truncated``; we don't want the registry middleware to chop again.
+    supports_full_output=True,
 )
 async def web_fetch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     import httpx

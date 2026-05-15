@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
+import os
 from typing import Any, Optional
 
 from app.agents.base import BaseAgent
@@ -48,30 +48,19 @@ log = logging.getLogger("finetune-studio.agents.loop")
 
 MAX_TURNS = 50
 MAX_TOOL_RETRIES = 3
-# Minimum wall-clock gap between consecutive LLM calls in the same run.
-# Smooths burst traffic so free-tier providers (Groq 30 RPM, Gemini 5 RPM)
-# do not slam into 429 retry storms. The sleep is asyncio-cancellable, so a
-# UserMessage interrupt still cancels promptly. Not applied before the
-# first turn so the user sees motion immediately.
-MIN_TURN_INTERVAL_SEC = 3.0
 
-# Per-provider overrides. Gemini's free tier is 5 RPM = one call every
-# 12s; anything tighter triggers RESOURCE_EXHAUSTED. Lookup is by
-# substring against the lowercased provider name so "google" /
-# "google-gemini" / "gemini" all match.
-_PROVIDER_THROTTLE_OVERRIDES: dict[str, float] = {
-    "gemini": 13.0,
-    "google": 13.0,
-    "vertex": 13.0,
-}
+# Rolling-context-window depth. Older messages collapse into a short
+# "context compaction" note so the prompt the LLM sees does not grow
+# unbounded — the single biggest cause of Gemini Flash free-tier TPM
+# exhaustion on long runs (e.g. Alpaca). The recent tool history is
+# still rendered into the system prompt by _render_tool_history.
+ROLLING_WINDOW_K = max(1, int(os.getenv("FT_ROLLING_WINDOW_K", "8")))
 
-
-def _throttle_for(provider: str) -> float:
-    p = (provider or "").lower()
-    for key, val in _PROVIDER_THROTTLE_OVERRIDES.items():
-        if key in p:
-            return val
-    return MIN_TURN_INTERVAL_SEC
+# RPM/TPM throttling now lives in app.agents.rate_limiter.PROVIDER_GATE
+# and is enforced inside stream_chat / stream_chat_async, so every
+# provider call (ping_llm, IntakeAgent, AgenticLoop, RecoveryAgent, ...)
+# shares the same per-provider bucket — bursts can no longer slip past
+# the loop's previous per-turn sleep gate.
 
 
 class AgenticLoop(BaseAgent):
@@ -203,18 +192,7 @@ class AgenticLoop(BaseAgent):
             )
             return
 
-        last_llm_call_at: Optional[float] = None
-        min_interval = _throttle_for(provider)
         for turn in range(1, MAX_TURNS + 1):
-            # Inter-turn throttle. Skip on the first turn so the user sees
-            # immediate motion; otherwise honor the provider's per-RPM
-            # cadence (Gemini 13s, others 3s).
-            if last_llm_call_at is not None:
-                elapsed = time.monotonic() - last_llm_call_at
-                gap = min_interval - elapsed
-                if gap > 0:
-                    await asyncio.sleep(gap)
-
             # Drain any user messages that arrived between turns.
             extra: list[str] = []
             while not inbox.empty():
@@ -225,9 +203,19 @@ class AgenticLoop(BaseAgent):
             if extra:
                 messages.append({"role": "user", "content": "\n\n".join(extra)})
 
+            # Compact the message history before each call so the prompt
+            # stays under the per-provider TPM cap. Older turns collapse
+            # into a one-line note; real user messages and the last K
+            # assistant/tool-result pairs are kept verbatim. This is the
+            # single biggest lever for free-tier Gemini survival on
+            # long runs (e.g. Alpaca).
+            messages, rolling_summary = _compact_messages(
+                messages, keep_last_k=ROLLING_WINDOW_K,
+            )
+
             # Build the system prompt freshly each turn so directives +
             # current state are always up-to-date.
-            system_prompt = self._compose_system(sid, tool_history)
+            system_prompt = self._compose_system(sid, tool_history, rolling_summary)
             tools = llm_tool_schemas()
 
             assistant_text = ""
@@ -277,10 +265,6 @@ class AgenticLoop(BaseAgent):
                         stop_reason = chunk.get("reason", "stop")
             except asyncio.CancelledError:
                 raise
-            finally:
-                # Stamp the moment the stream returned (success or error)
-                # so the next turn's throttle measures from here.
-                last_llm_call_at = time.monotonic()
 
             # Record what the assistant said this turn into the working
             # conversation. Skip empty assistant turns to keep context tight.
@@ -367,7 +351,12 @@ class AgenticLoop(BaseAgent):
 
     # ── System-prompt composition ────────────────────────────────────────
 
-    def _compose_system(self, sid: str, tool_history: list[dict[str, Any]]) -> str:
+    def _compose_system(
+        self,
+        sid: str,
+        tool_history: list[dict[str, Any]],
+        rolling_summary: str = "",
+    ) -> str:
         parts: list[str] = [AGENTIC_SYSTEM_PROMPT]
         directive_md = directives_service.render_for_prompt(sid, scope="global")
         if directive_md:
@@ -377,6 +366,8 @@ class AgenticLoop(BaseAgent):
             parts.append(state_md)
         if tool_history:
             parts.append(_render_tool_history(tool_history))
+        if rolling_summary:
+            parts.append(rolling_summary)
         return "\n\n".join(parts)
 
     def _render_state(self, sid: str) -> str:
@@ -480,3 +471,58 @@ def _format_tool_results_for_model(outputs: list[dict[str, Any]]) -> str:
             res_s = str(out.get("result"))
         lines.append(f"- {name}: {res_s[:1500]}")
     return "\n".join(lines)
+
+
+def _is_tool_result_message(m: dict[str, Any]) -> bool:
+    """Tool-result messages are user-role synthetic messages produced by
+    _format_tool_results_for_model. Real user messages never start with
+    this prefix."""
+    if m.get("role") != "user":
+        return False
+    content = m.get("content", "")
+    return isinstance(content, str) and content.startswith("[tool results]")
+
+
+def _compact_messages(
+    messages: list[dict[str, Any]], *, keep_last_k: int,
+) -> tuple[list[dict[str, Any]], str]:
+    """Rolling-window compaction.
+
+    Keeps:
+        - the very first user message (initial intent)
+        - every real (non-tool-result) user message (interrupts / directives)
+        - the last ``keep_last_k * 2`` messages (last K assistant + tool-result pairs)
+
+    Drops older assistant turns and older tool-result synthetic messages,
+    replacing them with a short note in the returned rolling_summary string
+    that the loop folds into the system prompt. The recent tool history
+    (last 20 calls) is still rendered into the system prompt by
+    ``_render_tool_history`` so the model retains its working context.
+    """
+    if not messages:
+        return messages, ""
+    tail_size = max(0, keep_last_k) * 2
+    if len(messages) <= 1 + tail_size:
+        return messages, ""
+
+    head = messages[:1]
+    tail = messages[-tail_size:] if tail_size > 0 else []
+    middle = messages[1: len(messages) - tail_size]
+
+    preserved_user: list[dict[str, Any]] = []
+    dropped = 0
+    for m in middle:
+        if m.get("role") == "user" and not _is_tool_result_message(m):
+            preserved_user.append(m)
+        else:
+            dropped += 1
+
+    summary = ""
+    if dropped:
+        summary = (
+            "## Context compaction\n"
+            f"- {dropped} older message(s) collapsed to save tokens. "
+            "Refer to the recent tool history above for prior tool outputs and decisions."
+        )
+
+    return head + preserved_user + tail, summary

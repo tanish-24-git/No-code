@@ -39,9 +39,28 @@ from app.events.log import get_event_log
 from app.events.types import AgentEvent
 from app.services import decision_log, session_service
 from app.tools.registry import list_descriptors
+from app.utils.config import settings
 
 
 router = APIRouter(tags=["sessions"])
+
+
+def _missing_session(session_id: str) -> HTTPException:
+    """Return 410 Gone when an events log exists but the session JSON is
+    missing (the session was wiped after the fact — the frontend should
+    drop its cached state). Otherwise return 404 Not Found.
+
+    Lets the UI distinguish "you typed a bad URL" from "your session was
+    cleared on the server" without polling, so a stale browser tab can
+    reset cleanly instead of looping on retries.
+    """
+    try:
+        events_path = settings.data_dir / "events" / f"{session_id}.jsonl"
+        if events_path.exists():
+            return HTTPException(410, "Session wiped")
+    except Exception:
+        pass
+    return HTTPException(404, "Session not found")
 
 
 @router.get("/api/sessions", response_model=list[SessionListItem])
@@ -53,7 +72,7 @@ def list_sessions() -> list[SessionListItem]:
 def get_session(session_id: str) -> AgentSession:
     s = session_service.get(session_id)
     if not s:
-        raise HTTPException(404, "Session not found")
+        raise _missing_session(session_id)
     return s
 
 
@@ -61,7 +80,7 @@ def get_session(session_id: str) -> AgentSession:
 async def stream_session_events(session_id: str) -> StreamingResponse:
     s = session_service.get(session_id)
     if not s:
-        raise HTTPException(404, "Session not found")
+        raise _missing_session(session_id)
 
     bus = get_bus()
     log = get_event_log()
@@ -104,7 +123,7 @@ async def stream_session_events(session_id: str) -> StreamingResponse:
 async def send_message(session_id: str, payload: SessionMessageRequest) -> dict:
     s = session_service.get(session_id)
     if not s:
-        raise HTTPException(404, "Session not found")
+        raise _missing_session(session_id)
     bus = get_bus()
     await bus.publish(AgentEvent(
         session_id=session_id,
@@ -119,7 +138,7 @@ async def send_message(session_id: str, payload: SessionMessageRequest) -> dict:
 async def reply_clarification(session_id: str, question_id: str, payload: ClarificationReply) -> dict:
     s = session_service.get(session_id)
     if not s:
-        raise HTTPException(404, "Session not found")
+        raise _missing_session(session_id)
     if not s.pending_question or s.pending_question.question_id != question_id:
         raise HTTPException(409, "No pending question with that id")
 
@@ -143,7 +162,7 @@ async def reply_clarification(session_id: str, question_id: str, payload: Clarif
 async def approve_pipeline(session_id: str, payload: ApprovalDecision) -> dict:
     s = session_service.get(session_id)
     if not s:
-        raise HTTPException(404, "Session not found")
+        raise _missing_session(session_id)
     if s.state != FSMState.AWAITING_APPROVAL:
         raise HTTPException(409, f"Session not awaiting approval (state={s.state.value})")
 
@@ -166,7 +185,7 @@ async def approve_pipeline(session_id: str, payload: ApprovalDecision) -> dict:
 async def submit_export(session_id: str, payload: ExportChoice) -> dict:
     s = session_service.get(session_id)
     if not s:
-        raise HTTPException(404, "Session not found")
+        raise _missing_session(session_id)
     if s.state != FSMState.AWAITING_EXPORT_CHOICE:
         raise HTTPException(409, f"Session not awaiting export (state={s.state.value})")
     if payload.choice not in ("local", "hf", "both"):
@@ -200,7 +219,7 @@ async def submit_export(session_id: str, payload: ExportChoice) -> dict:
 async def submit_retry(session_id: str, payload: RetryDecision) -> dict:
     s = session_service.get(session_id)
     if not s:
-        raise HTTPException(404, "Session not found")
+        raise _missing_session(session_id)
     bus = get_bus()
     kind = "RetryApproved" if payload.approve else "RetryDenied"
     await bus.publish(AgentEvent(
@@ -215,7 +234,7 @@ async def approve_phase(session_id: str, phase: str) -> dict:
     """User clicked Approve on a phase plan card. Lets the agent proceed."""
     s = session_service.get(session_id)
     if not s:
-        raise HTTPException(404, "Session not found")
+        raise _missing_session(session_id)
     bus = get_bus()
     await bus.publish(AgentEvent(
         session_id=session_id, kind="PhaseApproved", actor="user",
@@ -234,7 +253,7 @@ async def comment_phase(session_id: str, phase: str, payload: PhaseComment) -> d
     on the blackboard and adjust before continuing."""
     s = session_service.get(session_id)
     if not s:
-        raise HTTPException(404, "Session not found")
+        raise _missing_session(session_id)
     bus = get_bus()
     await bus.publish(AgentEvent(
         session_id=session_id, kind="PhaseCommented", actor="user",
@@ -247,7 +266,7 @@ async def comment_phase(session_id: str, phase: str, payload: PhaseComment) -> d
 async def cancel_session(session_id: str) -> dict:
     s = session_service.get(session_id)
     if not s:
-        raise HTTPException(404, "Session not found")
+        raise _missing_session(session_id)
     if s.state in (FSMState.DONE, FSMState.FAILED, FSMState.CANCELLED):
         return {"ok": True, "already": s.state.value}
     try:
@@ -265,7 +284,7 @@ async def cancel_session(session_id: str) -> dict:
 def session_audit(session_id: str) -> dict:
     s = session_service.get(session_id)
     if not s:
-        raise HTTPException(404, "Session not found")
+        raise _missing_session(session_id)
     decisions = decision_log.list_for_session(session_id)
     return {
         "session_id": session_id,
@@ -279,7 +298,7 @@ def session_blackboard(session_id: str) -> dict:
     critiques, decisions, nodes. Powers the Cognition tab in the UI."""
     s = session_service.get(session_id)
     if not s:
-        raise HTTPException(404, "Session not found")
+        raise _missing_session(session_id)
     from app.services.blackboard import get_blackboard
 
     bb = get_blackboard().read(session_id)
@@ -291,7 +310,7 @@ def session_checkpoint(session_id: str) -> dict:
     """Latest persisted checkpoint snapshot for crash-recovery debugging."""
     s = session_service.get(session_id)
     if not s:
-        raise HTTPException(404, "Session not found")
+        raise _missing_session(session_id)
     from app.services.checkpoint import get_checkpoint_store
 
     snap = get_checkpoint_store().load(session_id)

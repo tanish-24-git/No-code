@@ -56,6 +56,13 @@ async def upload_dataset(file: UploadFile = File(...)) -> DatasetUploadResponse:
     # Probe the configured LLM provider before booting the swarm. The result
     # determines whether agents run in full LLM-driven mode or deterministic
     # fallback mode; either way the user sees an explicit verdict in the UI.
+    #
+    # We do NOT defer this even though it adds a few seconds to the upload
+    # response — the orchestrator branches on probe.mode at SessionStarted,
+    # so a pending probe would lock the whole session into deterministic
+    # mode. The ProviderGate in providers.py now serializes ping_llm
+    # together with the subsequent intake/loop calls, so this synchronous
+    # probe no longer participates in a burst-RPM exhaustion pattern.
     probe = await ping_llm()
 
     # Start the agent session and emit the first event. The orchestrator
