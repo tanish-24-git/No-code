@@ -250,7 +250,11 @@ async def model_search_hf(args: dict[str, Any], _ctx: ToolContext) -> dict[str, 
         error = f"{type(e).__name__}: {str(e)[:200]}"
 
     if not candidates and not error:
-        error = "No models found on HuggingFace Hub matching the criteria."
+        error = (
+            f"No models found on HuggingFace Hub matching the task '{task}' "
+            f"within your hardware budget ({budget}B parameters). "
+            "Try a different family hint or provide a specific repo_id in a message."
+        )
 
     if size_hint_b:
         # Re-rank candidates to put the closest size on top.
@@ -262,11 +266,10 @@ async def model_search_hf(args: dict[str, Any], _ctx: ToolContext) -> dict[str, 
         "candidates": candidates,
         "source": source,
         "task": hf_task,
-        "max_params_b": budget,
+        "budget_b": budget,
         "device": hw.get("device", "cpu"),
         "error": error,
         "family_hint": family_hint,
-        "size_hint_b": size_hint_b,
     }
 
 

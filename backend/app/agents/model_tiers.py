@@ -159,11 +159,22 @@ def _load_tiers() -> dict[str, dict[str, str]]:
 
 
 def _resolve_provider_row(provider: str,
+                          model: str,
                           table: dict[str, dict[str, str]]) -> dict[str, str]:
     p = (provider or "").lower()
+    m = (model or "").lower()
+
+    # Priority 1: Exact/Substring match on the provider name.
     for key, row in table.items():
         if key in p:
             return row
+
+    # Priority 2: If the provider is generic (openai/custom) or unknown,
+    # look for hints in the model name (e.g. "llama" -> groq, "claude" -> anthropic).
+    for key, row in table.items():
+        if key in m:
+            return row
+
     return {}
 
 
@@ -210,7 +221,7 @@ def pick_model(provider: str, configured_model: str, tier: Tier) -> str:
     if not _routing_enabled() or not configured_model:
         return configured_model
     table = _load_tiers()
-    row = _resolve_provider_row(provider, table)
+    row = _resolve_provider_row(provider, configured_model, table)
     if not row:
         return configured_model
 

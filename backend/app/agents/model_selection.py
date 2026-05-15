@@ -28,7 +28,14 @@ class ModelSelectionAgent(BaseAgent):
     name = "ModelSelectionAgent"
     role = "Search the Hub, then rank candidates against hardware, dataset, and task."
     directive_scope = "model"
-    allowed_tools = ("model.search_hf", "model.rank_candidates", "model.estimate_fit", "audit.write")
+    allowed_tools = (
+        "model.search_hf",
+        "model.rank_candidates",
+        "model.estimate_fit",
+        "web_search",
+        "web_fetch",
+        "audit.write",
+    )
     triggers = ("HardwareProfileCompleted", "PipelineDraftRequested")
 
     async def handle(self, event: AgentEvent) -> None:
@@ -99,10 +106,40 @@ class ModelSelectionAgent(BaseAgent):
 
         hub_candidates = searched.get("candidates") or []
         if not hub_candidates:
+            # Fallback: Research the web if the Hub API is too restrictive or missing the latest models.
+            await self.think(
+                session_id,
+                f"Hub API returned nothing for '{family or goal}'. Searching the web for the latest HuggingFace model IDs.",
+                parent=event.id
+            )
+            web_results = await self.call_tool(
+                "web_search",
+                {"query": f"{family or goal} huggingface model repo id"},
+                session_id
+            )
+            # Use the LLM to extract potential repo IDs from the search snippets
+            extraction = await self.call_llm(
+                session_id,
+                f"Web search results for '{family or goal}':\n{web_results}\n\n"
+                "Extract the top 3 most likely HuggingFace repo IDs (format: 'Username/Repo-Name') from these snippets. "
+                "Only return the IDs, one per line. No other text.",
+                system="You are a repo-id extractor. Be precise.",
+                stream_thoughts=False,
+                parent=event.id
+            )
+            if extraction.strip():
+                ext_ids = [line.strip() for line in extraction.strip().split("\n") if "/" in line]
+                for rid in ext_ids[:3]:
+                    # Try to get metadata for these extracted IDs via a targeted search
+                    targeted = await self.call_tool("model.search_hf", {"query": rid, "top_n": 1}, session_id)
+                    if targeted.get("candidates"):
+                        hub_candidates.extend(targeted["candidates"])
+
+        if not hub_candidates:
             await self.emit_error(
                 session_id,
-                "no candidate models fit the device budget - "
-                "try a smaller family hint or attach a GPU",
+                "No candidate models fit the budget via Hub or Web search. "
+                "Try a smaller family hint or attach a GPU.",
             )
             return
 
@@ -272,8 +309,24 @@ class ModelSelectionAgent(BaseAgent):
                         return c
                     if best is None or abs(c["params_b"] - target_size) < abs(best["params_b"] - target_size):
                         best = c
-            if best:
-                return best
+        if best:
+            return best
 
-        await self.think(session_id, "Could not match the requested model in the search results.", parent=parent)
+        # FINAL FALLBACK: Web search for the specific model name requested in the comment.
+        await self.think(session_id, f"Model '{comment}' not in current search results. Searching the web to resolve its ID.", parent=parent)
+        web_res = await self.call_tool("web_search", {"query": f"{comment} huggingface repo id"}, session_id)
+        extraction = await self.call_llm(
+            session_id,
+            f"User wants: {comment}\nWeb search:\n{web_res}\n\nReturn ONLY the single best HuggingFace repo ID found. No other text.",
+            system="You resolve model names to repo IDs.",
+            stream_thoughts=False,
+            parent=parent
+        )
+        if extraction.strip() and "/" in extraction:
+            rid = extraction.strip().split()[0] # Take first word to be safe
+            targeted = await self.call_tool("model.search_hf", {"query": rid, "top_n": 1}, session_id)
+            if targeted.get("candidates"):
+                return targeted["candidates"][0]
+
+        await self.think(session_id, "Could not match the requested model in the search results or via web research.", parent=parent)
         return None

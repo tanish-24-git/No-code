@@ -267,11 +267,22 @@ class AgenticLoop(BaseAgent):
                 raise
 
             # Record what the assistant said this turn into the working
-            # conversation. Skip empty assistant turns to keep context tight.
-            if assistant_text.strip():
-                messages.append({"role": "assistant", "content": assistant_text})
-                # Mark the final-message boundary so the FE can finalize
-                # the assistant bubble.
+            # conversation. Include native tool_calls metadata so providers
+            # like Groq/OpenAI don't see a "corrupted" history.
+            if assistant_text.strip() or tool_calls:
+                msg: dict[str, Any] = {"role": "assistant", "content": assistant_text or None}
+                if tool_calls:
+                    msg["tool_calls"] = [
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {"name": tc["name"], "arguments": json.dumps(tc["args"])},
+                        }
+                        for tc in tool_calls
+                    ]
+                messages.append(msg)
+
+                # Mark the final-message boundary for the FE.
                 await self.stream_message(sid, "", is_final=True,
                                           parent=parent_event_id)
 
@@ -313,15 +324,13 @@ class AgenticLoop(BaseAgent):
                     "result": _summarize_for_history(res),
                 })
 
-            # Inject a synthetic user message describing the tool results so
-            # the next turn sees them. (We do not pass back the structured
-            # tool_call/tool_result message pair because we abstract across
-            # providers - the text projection is enough for the model to
-            # reason on.)
-            messages.append({
-                "role": "user",
-                "content": _format_tool_results_for_model(tool_outputs),
-            })
+            # Inject tool results using the native 'tool' role.
+            for out in tool_outputs:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": out["id"],
+                    "content": json.dumps(out["result"], default=str),
+                })
 
         log.warning("AgenticLoop hit MAX_TURNS=%d for session %s", MAX_TURNS, sid)
         await self.emit_message(
@@ -512,17 +521,24 @@ def _compact_messages(
     preserved_user: list[dict[str, Any]] = []
     dropped = 0
     for m in middle:
-        if m.get("role") == "user" and not _is_tool_result_message(m):
+        role = m.get("role")
+        # Keep real user messages (interrupts / instructions).
+        if role == "user":
             preserved_user.append(m)
-        else:
+        # Keep assistant/tool messages only if they are within the tail.
+        # Everything else in the middle gets dropped/summarized.
+        elif role in ("assistant", "tool"):
             dropped += 1
+        else:
+            # System or unknown; keep it just in case.
+            preserved_user.append(m)
 
     summary = ""
     if dropped:
         summary = (
             "## Context compaction\n"
-            f"- {dropped} older message(s) collapsed to save tokens. "
-            "Refer to the recent tool history above for prior tool outputs and decisions."
+            f"- {dropped} older message(s) (turns) collapsed to save tokens. "
+            "Refer to the recent tool history above for details on prior steps."
         )
 
     return head + preserved_user + tail, summary
