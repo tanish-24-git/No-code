@@ -30,45 +30,92 @@ class TaskInferenceAgent(BaseAgent):
         hw = session.artifacts.get("hardware")
         facts = session.artifacts.get("dataset_facts") or {}
         profile = session.artifacts.get("profile") or {}
-        
-        # Pull any goal set by the user in directives
+        ds = session.artifacts.get("dataset") or {}
+
+        # Pull any goal set by the user in directives. Goal is OPTIONAL —
+        # if the user hasn't said anything yet, we infer from data signals
+        # alone rather than silently bailing (which used to deadlock the
+        # downstream model_selection -> pipeline_builder chain).
         from app.services import directives as directives_service
         all_directives = directives_service.read_for_scope(session_id, "global")
         goal = next((d.text for d in all_directives if d.scope == "global"), None)
 
-        # Synchronicity check: we need hardware probe + dataset profile + user goal
-        # to make a high-confidence task inference.
-        if not hw or not facts or not goal:
-            return # Wait for the missing piece.
+        # Hardware + dataset facts are genuinely required; without them
+        # there's nothing to reason over.
+        if not hw or not facts:
+            return  # genuinely too early; wait for upstream profilers.
 
         buckets = facts.get("field_buckets") or {}
         info = facts.get("info") or {}
         imbalance = profile.get("imbalance") or {}
 
-        # The agent now relies entirely on its reasoning for task inference.
-        # Deterministic heuristics have been decommissioned.
+        goal_line = (
+            f"User goal: {goal}"
+            if goal
+            else "User goal: (none stated — infer the most plausible task from data signals only)"
+        )
+
+        # The agent relies on its reasoning for task inference; deterministic
+        # heuristics were decommissioned upstream, but we still call the
+        # task.classify tool as a safety net if the LLM is unavailable.
         proposal = await self.call_llm_typed(
             session_id,
             (
-                f"User Goal: {goal}\n"
+                f"{goal_line}\n"
                 f"Dataset metadata: {info}\n"
                 f"Field buckets: {buckets}\n"
                 f"Class imbalance: {imbalance}\n\n"
                 "What is the best fine-tuning task type? "
                 f"Pick from: {', '.join(CANONICAL_TASKS)}. "
-                "Synthesize the user goal with the observed field shapes. "
+                "Use the field shapes and class distribution as the primary signal; "
+                "only weight the user goal when present.\n"
                 'Return JSON: {"chosen": "...", "scores": {...}, "confidence": 0..1, "rationale": "..."}'
             ),
             TaskInferenceResult,
-            system="You are an ML data architect. Infer the task type purely from the data signals.",
+            system="You are an ML data architect. Infer the task type from data signals.",
             stream_thoughts=False,
             parent=event.id,
         )
 
+        # Deterministic fallback: when no LLM provider is configured or the
+        # LLM repeatedly returns invalid JSON, fall through to the
+        # task.classify tool so the pipeline can keep moving. Better a
+        # low-confidence default than a silent skip.
         if not proposal:
-            await self.emit_error(session_id, "AI failed to infer a task for this dataset.")
-            return
+            try:
+                fallback = await self.call_tool(
+                    "task.classify",
+                    {"buckets": buckets, "imbalance": imbalance, "info": info},
+                    session_id,
+                )
+                chosen_fb = (fallback or {}).get("chosen") or "instruction"
+                if chosen_fb in CANONICAL_TASKS:
+                    proposal = TaskInferenceResult(
+                        chosen=chosen_fb,
+                        scores={chosen_fb: 0.5},
+                        confidence=0.5,
+                        rationale="Deterministic fallback: task.classify (LLM unavailable).",
+                    )
+            except Exception:
+                pass
 
+        # Absolute floor: never leave the chain without SOME task inference.
+        # A wrong-but-safe guess ("instruction") is better than a deadlock;
+        # the user can comment to redirect and the loop will re-run this
+        # agent on the next UserClarificationReceived event.
+        if not proposal:
+            proposal = TaskInferenceResult(
+                chosen="instruction",
+                scores={"instruction": 0.4},
+                confidence=0.4,
+                rationale=(
+                    "Floor default: neither LLM nor deterministic classifier "
+                    "produced a result. Configure an LLM provider or "
+                    "comment on this card to refine."
+                ),
+            )
+
+        # Guaranteed non-None by the floor default above.
         chosen = proposal.chosen.lower()
         if chosen not in CANONICAL_TASKS:
             chosen = "instruction"

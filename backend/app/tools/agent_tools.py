@@ -145,7 +145,21 @@ async def infer_task_type(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
         actor="AgenticLoop", payload={},
     )
     await agent.handle(ev)
-    return {"task_inference": _session_artifact(ctx.session_id, "task_inference")}
+    result = _session_artifact(ctx.session_id, "task_inference")
+    if not result:
+        # Used to return {"task_inference": null}; orchestrator interpreted
+        # that as success and skipped downstream model selection. Now we
+        # tell it explicitly what to do.
+        return {
+            "error": "task_inference_unavailable",
+            "reason": (
+                "Required upstream signals are missing. Run "
+                "hardware.detect and dataset.profile_tokens first, "
+                "or wait for IntakeCompleted before retrying."
+            ),
+            "task_inference": None,
+        }
+    return {"task_inference": result}
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -154,13 +168,24 @@ async def infer_task_type(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
 
 @tool(
     name="select_base_model",
-    description="HF search + rank + user-approval card. Writes `chosen_model`. Honors family/size hints from directives.",
+    description=(
+        "HF search + rank + user-approval card. Writes `chosen_model`. "
+        "Auto-chains: runs infer_task_type first if task_inference is "
+        "missing. Honors family/size hints from directives."
+    ),
     input_schema={"type": "object", "properties": {}},
     side_effect="external",
     interactive=True,
     cancel_safe=False,
 )
 async def select_base_model(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    # Auto-chain: ensure task_inference exists before we ask the model
+    # search agent. Previously ModelSelectionAgent silently bailed when
+    # task was missing, returning {"chosen_model": null} to the
+    # orchestrator — which then crashed the pipeline_builder.
+    if not _session_artifact(ctx.session_id, "task_inference"):
+        await infer_task_type({}, ctx)
+
     from app.agents.model_selection import ModelSelectionAgent
     agent = ModelSelectionAgent(ctx.bus)
     ev = AgentEvent(
@@ -168,19 +193,54 @@ async def select_base_model(args: dict[str, Any], ctx: ToolContext) -> dict[str,
         actor="AgenticLoop", payload={},
     )
     await agent.handle(ev)
-    return {"chosen_model": _session_artifact(ctx.session_id, "chosen_model"),
-            "candidates": _session_artifact(ctx.session_id, "candidate_models")}
+    chosen = _session_artifact(ctx.session_id, "chosen_model")
+    candidates = _session_artifact(ctx.session_id, "candidate_models") or []
+    if not chosen:
+        return {
+            "error": "no_chosen_model",
+            "reason": (
+                "Model selection did not produce a candidate. Common "
+                "causes: HuggingFace Hub unreachable, no model fits the "
+                "VRAM budget, all web-search backends timed out, or the "
+                "user-approval card was rejected without a comment."
+            ),
+            "candidates": candidates,
+            "next_step": (
+                "Ask the user which model they want (e.g. 'use llama-3.2-1b'), "
+                "or call web_search('huggingface small instruct llm') and "
+                "retry with a fresh family hint."
+            ),
+            "chosen_model": None,
+        }
+    return {"chosen_model": chosen, "candidates": candidates}
 
 
 @tool(
     name="propose_training_strategy",
-    description="Pick LoRA/QLoRA/DoRA + Unsloth/GaLore/Liger + epochs/lr/batch with approval card. Needs chosen_model. Writes `strategy`, `runtime_estimate`.",
+    description=(
+        "Pick LoRA/QLoRA/DoRA + Unsloth/GaLore/Liger + epochs/lr/batch "
+        "with approval card. Auto-chains: runs select_base_model first "
+        "if chosen_model is missing. Writes `strategy`, `runtime_estimate`."
+    ),
     input_schema={"type": "object", "properties": {}},
     side_effect="read",
     interactive=True,
     cancel_safe=False,
 )
 async def propose_training_strategy(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    # Auto-chain: ensure chosen_model exists. Strategy can't reason about
+    # batch size or quantization without knowing the model size.
+    if not _session_artifact(ctx.session_id, "chosen_model"):
+        sel = await select_base_model({}, ctx)
+        if sel.get("error"):
+            return {
+                "error": "missing_chosen_model",
+                "reason": "select_base_model did not produce a candidate.",
+                "upstream_error": sel,
+                "strategy": None,
+                "runtime_estimate": None,
+            }
+
     from app.agents.strategy import TrainingStrategyAgent
     agent = TrainingStrategyAgent(ctx.bus)
     ev = AgentEvent(
@@ -188,8 +248,21 @@ async def propose_training_strategy(args: dict[str, Any], ctx: ToolContext) -> d
         actor="AgenticLoop", payload={},
     )
     await agent.handle(ev)
-    return {"strategy": _session_artifact(ctx.session_id, "strategy"),
-            "runtime_estimate": _session_artifact(ctx.session_id, "runtime_estimate")}
+    strategy = _session_artifact(ctx.session_id, "strategy")
+    runtime = _session_artifact(ctx.session_id, "runtime_estimate")
+    if not strategy:
+        return {
+            "error": "no_strategy",
+            "reason": (
+                "TrainingStrategyAgent did not produce a strategy. "
+                "Check that the LLM provider is configured and reachable, "
+                "or comment on the model card with your preferred method "
+                "(e.g. 'use qlora with 3 epochs')."
+            ),
+            "strategy": None,
+            "runtime_estimate": runtime,
+        }
+    return {"strategy": strategy, "runtime_estimate": runtime}
 
 
 @tool(
@@ -201,6 +274,19 @@ async def propose_training_strategy(args: dict[str, Any], ctx: ToolContext) -> d
     cancel_safe=False,
 )
 async def build_pipeline(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    # Auto-chain the whole upstream sequence if anything's missing. This
+    # is the last gate before training, so we burn the extra LLM calls
+    # to avoid a hard pipeline failure.
+    if not _session_artifact(ctx.session_id, "strategy"):
+        strat = await propose_training_strategy({}, ctx)
+        if strat.get("error"):
+            return {
+                "error": "missing_strategy",
+                "reason": "build_pipeline needs a strategy; upstream couldn't produce one.",
+                "upstream_error": strat,
+                "pipeline_id": None,
+            }
+
     from app.agents.pipeline_builder import PipelineBuilderAgent
     agent = PipelineBuilderAgent(ctx.bus)
     ev = AgentEvent(
@@ -210,7 +296,18 @@ async def build_pipeline(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
     await agent.handle(ev)
     from app.services import session_service
     s = session_service.get(ctx.session_id)
-    return {"pipeline_id": s.pipeline_id if s else None}
+    if not s or not s.pipeline_id:
+        return {
+            "error": "no_pipeline_built",
+            "reason": (
+                "PipelineBuilderAgent did not attach a pipeline_id to the "
+                "session. Common causes: chosen_model still missing after "
+                "auto-chain, dataset reference broken, or the graph "
+                "proposal failed schema validation."
+            ),
+            "pipeline_id": None,
+        }
+    return {"pipeline_id": s.pipeline_id}
 
 
 # ══════════════════════════════════════════════════════════════════════════

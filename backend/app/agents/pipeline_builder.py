@@ -36,11 +36,50 @@ class PipelineBuilderAgent(BaseAgent):
         if not ds:
             await self.emit_error(session_id, "dataset missing for session")
             return
+
+        # Last-chance recovery: if we somehow got triggered without a
+        # chosen_model (e.g. agentic loop reordered tool calls and an
+        # upstream agent silently bailed), invoke ModelSelectionAgent
+        # directly before giving up. Previously this branch hard-crashed
+        # the whole pipeline with "cannot proceed without a chosen base
+        # model" and left the frontend deadlocked.
+        if not chosen_model.get("repo_id"):
+            await self.think(
+                session_id,
+                "No chosen_model on the session yet. Invoking model selection "
+                "in-line to unblock pipeline construction.",
+                parent=event.id,
+            )
+            try:
+                from app.agents.model_selection import ModelSelectionAgent
+                sel_agent = ModelSelectionAgent(self.bus)
+                sel_agent.silent = True
+                sel_ev = AgentEvent(
+                    session_id=session_id,
+                    kind="HardwareProfileCompleted",
+                    actor=self.name,
+                    payload={},
+                )
+                await sel_agent.handle(sel_ev)
+            except Exception as e:  # pragma: no cover - defensive
+                await self.emit_error(
+                    session_id,
+                    f"In-line model selection failed: {e}. "
+                    "Please comment with a specific model id "
+                    "(e.g. 'use meta-llama/Llama-3.2-1B-Instruct').",
+                )
+                return
+            # Refresh session state after the inline run.
+            session = self.get_session(session_id) or session
+            chosen_model = session.artifacts.get("chosen_model") or {}
+
         if not chosen_model.get("repo_id"):
             await self.emit_error(
                 session_id,
                 "pipeline_builder cannot proceed without a chosen base model. "
-                "Model search did not return a candidate that fits this hardware.",
+                "Model search did not return a candidate. Comment with a "
+                "specific model id to override (e.g. 'use meta-llama/"
+                "Llama-3.2-1B-Instruct').",
             )
             return
 
