@@ -34,12 +34,14 @@ import re
 from typing import Any, Optional
 
 from app.agents.base import BaseAgent
+from app.agents.model_tiers import recommended_keep_last_k
 from app.agents.prompts import AGENTIC_SYSTEM_PROMPT
 from app.agents.providers import stream_chat_async
 from app.events.bus import EventBus
 from app.events.types import AgentEvent
 from app.services import dataset_service, job_service, session_service
 from app.services import directives as directives_service
+from app.services import memory as memory_service
 from app.tools.registry import ToolContext, get_tool, llm_tool_schemas, run_tool
 from app.utils.config import settings
 
@@ -59,11 +61,15 @@ log = logging.getLogger("finetune-studio.agents.loop")
 MAX_TURNS = 50
 MAX_TOOL_RETRIES = 3
 
-# Rolling-context-window depth. Older messages collapse into a short
-# "context compaction" note so the prompt the LLM sees does not grow
-# unbounded — the single biggest cause of Gemini Flash free-tier TPM
-# exhaustion on long runs (e.g. Alpaca). The recent tool history is
-# still rendered into the system prompt by _render_tool_history.
+# Rolling-context-window depth. Default is model-aware (see
+# model_tiers.recommended_keep_last_k); the env var is a hard override
+# for ops who want a fixed ceiling regardless of which model the user
+# configured. Older messages collapse into a short "context compaction"
+# note so the prompt does not grow unbounded — the single biggest
+# cause of Gemini Flash free-tier TPM exhaustion on long runs. The
+# recent tool history is still rendered into the system prompt by
+# _render_tool_history.
+ROLLING_WINDOW_K_ENV_SET = "FT_ROLLING_WINDOW_K" in os.environ
 ROLLING_WINDOW_K = max(1, int(os.getenv("FT_ROLLING_WINDOW_K", "8")))
 
 # RPM/TPM throttling now lives in app.agents.rate_limiter.PROVIDER_GATE
@@ -235,14 +241,18 @@ class AgenticLoop(BaseAgent):
             if extra:
                 messages.append({"role": "user", "content": "\n\n".join(extra)})
 
-            # Compact the message history before each call so the prompt
-            # stays under the per-provider TPM cap. Older turns collapse
-            # into a one-line note; real user messages and the last K
-            # assistant/tool-result pairs are kept verbatim. This is the
-            # single biggest lever for free-tier Gemini survival on
-            # long runs (e.g. Alpaca).
+            # Compact the message history before each call. Window depth
+            # is derived from the configured model's context budget
+            # (Sonnet 200K -> deeper window than Llama-3.1-8B at 8K).
+            # The env override ROLLING_WINDOW_K is honoured for users
+            # who want a hard ceiling regardless of model.
+            dynamic_k = recommended_keep_last_k(model)
+            if ROLLING_WINDOW_K_ENV_SET:
+                effective_k = ROLLING_WINDOW_K  # explicit override
+            else:
+                effective_k = dynamic_k
             messages, rolling_summary = _compact_messages(
-                messages, keep_last_k=ROLLING_WINDOW_K,
+                messages, keep_last_k=effective_k,
             )
 
             # Build the system prompt freshly each turn so directives +
@@ -399,6 +409,13 @@ class AgenticLoop(BaseAgent):
         rolling_summary: str = "",
     ) -> str:
         parts: list[str] = [AGENTIC_SYSTEM_PROMPT]
+        # FINETUNE.md cross-session memory — re-read on every turn so
+        # the user can edit it live with a text editor and the next
+        # tool call honours the change. Same pattern Claude Code uses
+        # for CLAUDE.md.
+        memory_md = memory_service.compose_for_prompt(sid)
+        if memory_md:
+            parts.append(memory_md)
         directive_md = directives_service.render_for_prompt(sid, scope="global")
         if directive_md:
             parts.append(directive_md)

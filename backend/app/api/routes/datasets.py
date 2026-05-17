@@ -7,6 +7,9 @@ directory uploads. All file types accepted (extension-agnostic).
 """
 from __future__ import annotations
 
+import logging
+import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -23,7 +26,75 @@ from app.tools.llm import ping_llm
 from app.utils.config import settings
 
 
+log = logging.getLogger("finetune-studio.datasets")
+
 router = APIRouter(prefix="/api/datasets", tags=["datasets"])
+
+
+# ── Upload safety guards ──────────────────────────────────────────────────
+#
+# We accept arbitrary user content. Three classes of risk to defend against:
+#   1. Path traversal — filename with ".." or absolute paths
+#   2. Resource exhaustion — multi-GB upload OOMing the backend
+#   3. Pickle / joblib RCE — code execution via deserialisation
+#
+# These are server-side caps; the UI may apply tighter limits.
+
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(500 * 1024 * 1024)))  # 500 MiB
+MAX_DIRECTORY_BYTES = int(os.getenv("MAX_DIRECTORY_BYTES", str(2 * 1024 * 1024 * 1024)))  # 2 GiB
+MAX_DIRECTORY_FILES = int(os.getenv("MAX_DIRECTORY_FILES", "1000"))
+
+# Pickle/joblib executes arbitrary code on .load. We don't use them anywhere,
+# but a malicious upload could trick a future feature into doing so. Reject
+# at the front door.
+_DENYLIST_EXTENSIONS = frozenset({
+    ".pkl", ".pickle", ".joblib", ".dill",
+    ".pyc", ".pyo",
+    ".exe", ".dll", ".so", ".dylib",
+    ".bat", ".cmd", ".sh", ".ps1",
+})
+
+# Safe filename chars: alphanumerics, dot, dash, underscore. Anything else
+# gets stripped. We also clamp length so an attacker can't blow path-length
+# limits with a 10K-char filename.
+_FILENAME_KEEP = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _sanitize_filename(raw: str) -> str:
+    """Strip path components, normalise to safe chars, cap length.
+
+    Path traversal defence: ``Path(raw).name`` already drops directory
+    parts, but on Windows a backslash-containing filename can still slip
+    through some tooling — so we do both ``Path.name`` and an explicit
+    regex sweep.
+    """
+    base = Path(raw or "").name  # drops "../" prefixes on POSIX
+    # Strip backslash-containing pieces (Windows-style) just in case.
+    base = base.rsplit("\\", 1)[-1]
+    base = base.rsplit("/", 1)[-1]
+    cleaned = _FILENAME_KEEP.sub("_", base).strip("._-")
+    if not cleaned:
+        cleaned = "upload"
+    if len(cleaned) > 200:
+        # Preserve any extension after the truncation.
+        stem, dot, ext = cleaned.rpartition(".")
+        cleaned = stem[: 200 - len(dot) - len(ext)] + dot + ext if dot else cleaned[:200]
+    return cleaned
+
+
+def _reject_dangerous_extension(filename: str) -> None:
+    """Hard-fail uploads with executable or deserialisable extensions."""
+    ext = Path(filename).suffix.lower()
+    if ext in _DENYLIST_EXTENSIONS:
+        raise HTTPException(
+            status_code=415,
+            detail=(
+                f"File type '{ext}' is not accepted. Pickle / joblib / "
+                f"executable formats can run arbitrary code on load and "
+                f"are rejected at the gate. Convert to CSV / JSON / "
+                f"JSONL / TXT first."
+            ),
+        )
 
 
 class LLMProbe(BaseModel):
@@ -45,11 +116,23 @@ class DatasetUploadResponse(BaseModel):
 async def upload_dataset(file: UploadFile = File(...)) -> DatasetUploadResponse:
     """Upload any file (extension-agnostic). The Universal Intake Engine
     sniffs the content to determine type and parses accordingly."""
+    raw_name = file.filename or "dataset"
+    _reject_dangerous_extension(raw_name)
+    safe_name = _sanitize_filename(raw_name)
+    # Stream-read with a hard cap so a 50 GiB upload doesn't OOM the
+    # backend. UploadFile already spools to disk above 1 MiB so this is
+    # cheap in practice.
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="Empty file")
+    if len(contents) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Upload exceeds limit ({len(contents)} > {MAX_UPLOAD_BYTES} bytes). "
+                   f"Set MAX_UPLOAD_BYTES env var to raise the cap.",
+        )
     try:
-        dataset = dataset_service.save_uploaded(file.filename or "dataset", contents)
+        dataset = dataset_service.save_uploaded(safe_name, contents)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -96,20 +179,61 @@ async def upload_directory(files: list[UploadFile] = File(...)) -> DatasetUpload
     concatenated for cross-file synthesis."""
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
+    if len(files) > MAX_DIRECTORY_FILES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Too many files ({len(files)} > {MAX_DIRECTORY_FILES}). "
+                   f"Set MAX_DIRECTORY_FILES env var to raise the cap.",
+        )
 
-    # Write all uploaded files to a temporary directory
+    # Write all uploaded files to a temporary directory. We deliberately
+    # FLATTEN subdirectories: the old code preserved "subdir/file.txt"
+    # which silently enabled path traversal via filenames like
+    # "../../etc/passwd". The aggregator doesn't need subdir structure
+    # to do its job, so we sanitise + flatten + dedupe by suffixing.
     tmp_dir = Path(tempfile.mkdtemp(dir=settings.upload_dir, prefix="dir_"))
+    total_bytes = 0
     try:
-        for f in files:
-            fname = f.filename or "unnamed"
-            # Preserve subdirectory structure from filenames like "subdir/file.txt"
-            target = tmp_dir / fname
-            target.parent.mkdir(parents=True, exist_ok=True)
+        seen_names: dict[str, int] = {}
+        for idx, f in enumerate(files):
+            raw_name = f.filename or "unnamed"
+            _reject_dangerous_extension(raw_name)
+            safe_name = _sanitize_filename(raw_name)
+            # Dedupe by suffixing when the same sanitised name shows up
+            # more than once (e.g. multiple "data.csv" from different
+            # subdirs).
+            n = seen_names.get(safe_name, 0)
+            seen_names[safe_name] = n + 1
+            if n > 0:
+                stem, dot, ext = safe_name.rpartition(".")
+                safe_name = f"{stem}_{n}{dot}{ext}" if dot else f"{safe_name}_{n}"
+
+            target = tmp_dir / safe_name
+            # Defence in depth: refuse any target path that resolves
+            # outside tmp_dir even after sanitisation.
+            try:
+                target.resolve().relative_to(tmp_dir.resolve())
+            except ValueError:
+                log.warning("rejecting upload that escaped tmp_dir: %r -> %s", raw_name, target)
+                continue
+
             content = await f.read()
-            if content:
-                target.write_bytes(content)
+            if not content:
+                continue
+            total_bytes += len(content)
+            if total_bytes > MAX_DIRECTORY_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Directory upload exceeds limit "
+                           f"({total_bytes} > {MAX_DIRECTORY_BYTES} bytes). "
+                           f"Set MAX_DIRECTORY_BYTES env var to raise.",
+                )
+            target.write_bytes(content)
 
         dataset = dataset_service.save_uploaded_directory(tmp_dir)
+    except HTTPException:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
     except ValueError as e:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail=str(e)) from e
