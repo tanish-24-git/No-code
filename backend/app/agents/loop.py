@@ -267,11 +267,22 @@ class AgenticLoop(BaseAgent):
                 raise
 
             # Record what the assistant said this turn into the working
-            # conversation. Skip empty assistant turns to keep context tight.
-            if assistant_text.strip():
-                messages.append({"role": "assistant", "content": assistant_text})
-                # Mark the final-message boundary so the FE can finalize
-                # the assistant bubble.
+            # conversation. Include native tool_calls metadata so providers
+            # like Groq/OpenAI don't see a "corrupted" history.
+            if assistant_text.strip() or tool_calls:
+                msg: dict[str, Any] = {"role": "assistant", "content": assistant_text or None}
+                if tool_calls:
+                    msg["tool_calls"] = [
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {"name": tc["name"], "arguments": json.dumps(tc["args"])},
+                        }
+                        for tc in tool_calls
+                    ]
+                messages.append(msg)
+
+                # Mark the final-message boundary for the FE.
                 await self.stream_message(sid, "", is_final=True,
                                           parent=parent_event_id)
 
@@ -313,15 +324,13 @@ class AgenticLoop(BaseAgent):
                     "result": _summarize_for_history(res),
                 })
 
-            # Inject a synthetic user message describing the tool results so
-            # the next turn sees them. (We do not pass back the structured
-            # tool_call/tool_result message pair because we abstract across
-            # providers - the text projection is enough for the model to
-            # reason on.)
-            messages.append({
-                "role": "user",
-                "content": _format_tool_results_for_model(tool_outputs),
-            })
+            # Inject tool results using the native 'tool' role.
+            for out in tool_outputs:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": out["id"],
+                    "content": json.dumps(out["result"], default=str),
+                })
 
         log.warning("AgenticLoop hit MAX_TURNS=%d for session %s", MAX_TURNS, sid)
         await self.emit_message(
@@ -486,34 +495,46 @@ def _is_tool_result_message(m: dict[str, Any]) -> bool:
 def _compact_messages(
     messages: list[dict[str, Any]], *, keep_last_k: int,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Rolling-window compaction.
+    """Rolling-window compaction that respects native tool-call sequences.
 
     Keeps:
         - the very first user message (initial intent)
-        - every real (non-tool-result) user message (interrupts / directives)
-        - the last ``keep_last_k * 2`` messages (last K assistant + tool-result pairs)
+        - every real user message (interrupts / directives)
+        - the last K 'logical turns'. A turn is defined as an assistant message 
+          (with or without tool_calls) followed by its tool results and 
+          any subsequent user response.
 
-    Drops older assistant turns and older tool-result synthetic messages,
-    replacing them with a short note in the returned rolling_summary string
-    that the loop folds into the system prompt. The recent tool history
-    (last 20 calls) is still rendered into the system prompt by
-    ``_render_tool_history`` so the model retains its working context.
+    This ensures we never orphan a tool-call from its result, which would
+    cause a fatal API error on Groq/OpenAI.
     """
-    if not messages:
-        return messages, ""
-    tail_size = max(0, keep_last_k) * 2
-    if len(messages) <= 1 + tail_size:
+    if not messages or len(messages) <= (keep_last_k * 2) + 1:
         return messages, ""
 
+    # 1. Identify where the 'tail' starts. We look back for the K-th turn.
+    # We walk backwards and count assistant messages that aren't tool-results.
+    tail_start_idx = 0
+    turns_found = 0
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "assistant":
+            turns_found += 1
+            if turns_found >= keep_last_k:
+                tail_start_idx = i
+                break
+    
+    # Ensure we don't accidentally start the tail in the middle of a tool sequence.
+    # (Though by looking for the assistant message, we should be at the start).
+    
     head = messages[:1]
-    tail = messages[-tail_size:] if tail_size > 0 else []
-    middle = messages[1: len(messages) - tail_size]
+    middle = messages[1:tail_start_idx]
+    tail = messages[tail_start_idx:]
 
-    preserved_user: list[dict[str, Any]] = []
+    preserved: list[dict[str, Any]] = []
     dropped = 0
     for m in middle:
+        # Keep real user messages (original instructions / interrupts)
+        # but drop tool results and intermediate assistant thoughts.
         if m.get("role") == "user" and not _is_tool_result_message(m):
-            preserved_user.append(m)
+            preserved.append(m)
         else:
             dropped += 1
 
@@ -521,8 +542,8 @@ def _compact_messages(
     if dropped:
         summary = (
             "## Context compaction\n"
-            f"- {dropped} older message(s) collapsed to save tokens. "
-            "Refer to the recent tool history above for prior tool outputs and decisions."
+            f"- {dropped} older intermediate turns collapsed to save tokens. "
+            "Refer to the Recent Tool History below for the results of those steps."
         )
 
-    return head + preserved_user + tail, summary
+    return head + preserved + tail, summary

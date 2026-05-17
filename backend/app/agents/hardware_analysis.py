@@ -13,6 +13,7 @@ class HardwareAnalysisAgent(BaseAgent):
     directive_scope = "training"
     allowed_tools = ("hardware.detect", "hardware.estimate_throughput", "audit.write")
     triggers = ("DatasetProfileCompleted",)
+    tier_preference = "fast"  # mechanical narration over hardware specs
 
     async def handle(self, event: AgentEvent) -> None:
         session_id = event.session_id

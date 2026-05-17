@@ -23,6 +23,7 @@ class DataAlchemistAgent(BaseAgent):
         "alchemy.induce_schema",
         "audit.write",
     )
+    tier_preference = "fast"  # grades a deterministic metrics dict
     triggers = ("DatasetProfileCompleted",)
 
     async def handle(self, event: AgentEvent) -> None:

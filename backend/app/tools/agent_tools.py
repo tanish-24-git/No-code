@@ -227,6 +227,11 @@ async def build_pipeline(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
 )
 async def run_training(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     from app.agents.execution import ExecutionAgent
+    from app.services import session_service
+    s = session_service.get(ctx.session_id)
+    if not s or not s.pipeline_id:
+        return {"error": "Cannot run training: No pipeline has been built yet. Please call build_pipeline first (and ensure a base model was successfully selected)."}
+    
     agent = ExecutionAgent(ctx.bus)
     agent.silent = True
     ev = AgentEvent(
@@ -234,7 +239,6 @@ async def run_training(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]
         actor="AgenticLoop", payload={},
     )
     await agent.handle(ev)
-    from app.services import session_service
     s = session_service.get(ctx.session_id)
     return {"job_id": s.job_id if s else None}
 

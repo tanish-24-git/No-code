@@ -35,6 +35,7 @@ from typing import Any, Optional, Type, TypeVar
 
 from pydantic import BaseModel
 
+from app.agents.model_tiers import Tier, pick_model
 from app.agents.providers import stream_chat
 from app.agents.schemas import LLMSchemaError, parse_llm_json
 from app.events.bus import EventBus
@@ -74,6 +75,15 @@ class BaseAgent:
     # The AgenticLoop sets this on wrapped sub-agents so the loop's own
     # LLM is the only voice in the chat.
     silent: bool = False
+
+    # Default tier for this agent's LLM calls. "strong" keeps the user's
+    # configured model unchanged. "fast" / "medium" auto-route to a
+    # cheaper same-provider sibling via app.agents.model_tiers — set
+    # this on wrapped specialty agents whose reasoning is mechanical
+    # narration (intake, profile, hardware) to preserve free-tier RPD
+    # for the strategic decisions. Per-call override available via the
+    # ``tier`` parameter on call_llm / call_llm_typed.
+    tier_preference: Tier = "strong"
 
     def __init__(self, bus: EventBus) -> None:
         self.bus = bus
@@ -505,12 +515,18 @@ class BaseAgent:
         include_tools: bool = False,
         include_context: bool = True,
         parent: Optional[str] = None,
+        tier: Optional[Tier] = None,
     ) -> str:
         """Run a single LLM turn with shared context injected.
 
         Reads the configured provider from the session (encrypted at rest)
         or falls back to global settings. Returns "" when no provider is
         configured - callers should branch on that.
+
+        The ``tier`` parameter (or, when omitted, the agent's
+        ``tier_preference`` class attribute) may swap the model for a
+        cheaper same-provider sibling. The substitution never upgrades
+        the user's pick; see app.agents.model_tiers for the rules.
         """
         session = self.get_session(session_id)
         if not session:
@@ -542,6 +558,11 @@ class BaseAgent:
 
         if not provider or not model:
             return ""
+
+        # Tier routing: optionally swap to a cheaper same-provider model
+        # for narration-grade calls. Never upgrades above the user's pick.
+        effective_tier: Tier = tier if tier is not None else self.tier_preference
+        model = pick_model(provider, model, effective_tier)
 
         # Augment the system prompt with directives + artifacts.
         ctx_block = self._build_context_block(session_id) if include_context else ""
@@ -600,6 +621,7 @@ class BaseAgent:
         include_context: bool = True,
         parent: Optional[str] = None,
         max_retries: int = 1,
+        tier: Optional[Tier] = None,
     ) -> Optional[T]:
         """Same as call_llm, but parses the response against a pydantic
         schema. Retries once on a parse failure with a corrective hint.
@@ -619,6 +641,7 @@ class BaseAgent:
                 stream_thoughts=stream_thoughts,
                 include_context=include_context,
                 parent=parent,
+                tier=tier,
             )
             if not raw:
                 return None

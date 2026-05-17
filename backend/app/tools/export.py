@@ -20,21 +20,25 @@ from app.utils.config import settings
     input_schema={
         "type": "object",
         "properties": {
-            "job_id": {"type": "string"},
-            "name": {"type": "string"},
+            "job_id": {"type": "string", "description": "The ID of the training job to export."},
+            "name": {"type": "string", "description": "Optional display name for the model."},
         },
         "required": ["job_id"],
     },
     side_effect="write_resource",
 )
 async def export_save_local(args: dict[str, Any], _ctx: ToolContext) -> dict[str, Any]:
-    job_id = args["job_id"]
+    job_id = args.get("job_id")
+    if not job_id:
+        return {"error": "Missing 'job_id'. You can only export a model after run_training has successfully completed."}
+    
     raw_job = store.read("jobs", job_id)
     if not raw_job:
-        return {"error": "job not found"}
+        return {"error": f"Job {job_id} not found. Ensure the training job actually started."}
+    
     out = raw_job.get("model_output_path")
     if not out or not Path(out).exists():
-        return {"error": "no model artifact for job"}
+        return {"error": "No model artifact found for this job. Did training finish successfully?"}
 
     model_id = f"trained_{job_id}"
     name = args.get("name") or f"trained-{job_id[:8]}"

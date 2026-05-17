@@ -50,6 +50,9 @@ class DataRestructurerAgent(BaseAgent):
         "alchemy.build_restructure_prompt",
     )
     triggers = ("DatasetUploaded",)
+    # Restructuring is the high-volume LLM workload — many chunks per
+    # document. Cheap tier saves the most quota here.
+    tier_preference = "fast"
 
     async def handle(self, event: AgentEvent) -> None:
         session_id = event.session_id

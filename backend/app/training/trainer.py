@@ -239,6 +239,30 @@ def run_training(
     """
     deps = _require_stack()
     torch = deps["torch"]
+    
+    # HARDWARE GUARD: If no CUDA is detected, we must downgrade high-perf 
+    # optimizations to CPU-safe alternatives to prevent immediate crashes.
+    _has_cuda = torch.cuda.is_available()
+    if not _has_cuda:
+        if quantization != "none":
+            log.warning("CPU detected: downgrading quantization '%s' -> 'none'", quantization)
+            quantization = "none"
+        if precision != "fp32":
+            log.warning("CPU detected: forcing precision '%s' -> 'fp32'", precision)
+            precision = "fp32"
+        if use_unsloth:
+            log.warning("CPU detected: disabling Unsloth (CUDA-only)")
+            use_unsloth = False
+        if use_liger:
+            log.warning("CPU detected: disabling Liger kernels (CUDA-only)")
+            use_liger = False
+        if optimizer.startswith("galore") or optimizer == "adam8bit":
+            log.warning("CPU detected: downgrading optimizer '%s' -> 'adamw'", optimizer)
+            optimizer = "adamw"
+        if method == "qlora":
+            log.warning("CPU detected: downgrading method 'qlora' -> 'lora'")
+            method = "lora"
+
     AutoTokenizer = deps["AutoTokenizer"]
     AutoModelForCausalLM = deps["AutoModelForCausalLM"]
     LoraConfig = deps["LoraConfig"]

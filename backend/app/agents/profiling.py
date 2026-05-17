@@ -19,6 +19,7 @@ class DatasetProfilingAgent(BaseAgent):
         "audit.write",
     )
     triggers = ("IntakeCompleted",)
+    tier_preference = "fast"  # narration of numeric profile output
 
     async def handle(self, event: AgentEvent) -> None:
         session_id = event.session_id
