@@ -13,6 +13,8 @@ export default function SettingsPage() {
   const [model, setModel] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
+  const [apiKeysText, setApiKeysText] = useState('');
+  const [showMultiKey, setShowMultiKey] = useState(false);
   const [hfToken, setHfToken] = useState('');
   const [verifying, setVerifying] = useState<'llm' | 'hf' | null>(null);
   const [verifyMsg, setVerifyMsg] = useState<string | null>(null);
@@ -44,6 +46,11 @@ export default function SettingsPage() {
   if (!data || !providers) return <div className="p-8 text-fg-2">loading...</div>;
 
   const saveLLM = async () => {
+    // Parse plural keys: accept newline OR comma separated; trim and drop blanks.
+    const parsedKeys = apiKeysText
+      .split(/[\n,]+/)
+      .map((k) => k.trim())
+      .filter(Boolean);
     await api('/api/settings/llm', {
       method: 'POST',
       body: JSON.stringify({
@@ -51,9 +58,11 @@ export default function SettingsPage() {
         model,
         base_url: baseUrl || null,
         api_key: apiKey || undefined,
+        api_keys: parsedKeys.length > 0 ? parsedKeys : undefined,
       }),
     });
     setApiKey('');
+    setApiKeysText('');
     mutate();
   };
   const clearLLM = async () => {
@@ -207,6 +216,42 @@ export default function SettingsPage() {
               onChange={(e) => setApiKey(e.target.value)}
               placeholder={activeSpec?.needs_key ? 'sk-... or hf_...' : 'optional - blank for local servers'}
             />
+          </div>
+
+          <div className="md:col-span-2">
+            <button
+              type="button"
+              onClick={() => setShowMultiKey((v) => !v)}
+              className="text-[11px] text-fg-3 hover:text-orange-300 underline-offset-2 hover:underline"
+            >
+              {showMultiKey ? 'hide' : 'show'} multiple-key rotation (paid-tier scaling)
+            </button>
+            {data.llm_api_keys_count > 1 && (
+              <span className="ml-3 pill"><span className="dot dot-success" /> {data.llm_api_keys_count} keys rotating</span>
+            )}
+            {showMultiKey && (
+              <div className="mt-3 space-y-2">
+                <label className="label">
+                  rotation pool (one key per line or comma-separated)
+                </label>
+                <textarea
+                  className="input min-h-[100px] font-mono text-xs"
+                  value={apiKeysText}
+                  onChange={(e) => setApiKeysText(e.target.value)}
+                  placeholder={
+                    'AIza...key1\nAIza...key2\nAIza...key3\n\n' +
+                    '# Each key gets its own RPM/TPM bucket, so 3 keys = 3x effective throughput.'
+                  }
+                />
+                <div className="text-[10px] text-fg-3 leading-relaxed">
+                  Each key gets its own rate-limit bucket — N keys ≈ N× effective RPM/TPM.
+                  Free-tier users can pool multiple free accounts; paid-tier users with a
+                  single key can leave this blank and either raise the limits in
+                  <code className="px-1 mx-1 py-0.5 rounded bg-white/5 border border-white/10 text-white/80 font-mono">data/provider_limits.json</code>
+                  or just let the provider's 429s drive the gate.
+                </div>
+              </div>
+            )}
           </div>
         </div>
 

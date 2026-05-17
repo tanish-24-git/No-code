@@ -26,14 +26,41 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 import re
+import time
 from typing import Any, Awaitable, Callable
 
 from app.tools.registry import ToolContext, tool
 
 
 log = logging.getLogger("finetune-studio.tools.web")
+
+
+# In-process TTL cache so multi-agent workflows don't re-hit the chain on
+# identical queries. Cleared by process restart.
+_SEARCH_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_SEARCH_CACHE_TTL = 600.0  # 10 min
+
+
+def _cache_get(key: str) -> dict[str, Any] | None:
+    entry = _SEARCH_CACHE.get(key)
+    if not entry:
+        return None
+    ts, payload = entry
+    if time.time() - ts > _SEARCH_CACHE_TTL:
+        _SEARCH_CACHE.pop(key, None)
+        return None
+    return payload
+
+
+def _cache_put(key: str, payload: dict[str, Any]) -> None:
+    _SEARCH_CACHE[key] = (time.time(), payload)
+    if len(_SEARCH_CACHE) > 256:
+        # Cheap LRU-ish eviction: drop the oldest entry.
+        oldest = min(_SEARCH_CACHE.items(), key=lambda kv: kv[1][0])
+        _SEARCH_CACHE.pop(oldest[0], None)
 
 
 _USER_AGENT = (
@@ -46,6 +73,117 @@ _BUSY_RESPONSE: dict[str, Any] = {
 }
 
 
+# ── Backend -1: Gemini native grounding (opt-in via LLM_PROVIDER=gemini) ──
+#
+# When the user is on a Gemini paid key that supports Vertex AI / Google
+# Search grounding, this returns crisp citations with URLs. Free-tier
+# Gemini doesn't support grounding; the call fails fast and the chain
+# moves on to DDG/etc.
+
+def _resolve_gemini_credentials() -> tuple[str, str]:
+    """Return (api_key, model_name) if the user is on Gemini, else ('', '')."""
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    model_name = ""
+    try:
+        from app.api.routes.settings import get_llm_config
+        cfg = get_llm_config()
+        if (cfg.provider or "").lower() == "gemini":
+            api_key = api_key or cfg.api_key
+            model_name = cfg.model or model_name
+    except Exception:
+        pass
+    if not api_key:
+        prov = (os.environ.get("LLM_PROVIDER") or "").lower()
+        if "gemini" in prov:
+            api_key = os.environ.get("LLM_API_KEY", "").strip()
+    if not model_name:
+        model_name = os.environ.get("GEMINI_GROUNDING_MODEL", "gemini-2.0-flash")
+    return api_key, model_name
+
+
+async def _gemini_grounding(query: str, max_results: int) -> dict[str, Any]:
+    """Use Gemini's built-in Google Search grounding tool when available.
+
+    Best-effort: returns ``{"error": "not_configured"}`` when the user
+    isn't on Gemini, the SDK isn't installed, the key lacks grounding
+    permission, or the API call fails. The chain falls through to the
+    next backend in any of those cases — grounding is an upgrade, not a
+    requirement.
+    """
+    api_key, model_name = _resolve_gemini_credentials()
+    if not api_key:
+        return {"error": "not_configured"}
+    # Allow opt-out without uninstalling the SDK.
+    if os.environ.get("GEMINI_GROUNDING_DISABLED", "").lower() in ("1", "true", "yes"):
+        return {"error": "disabled"}
+
+    def _do() -> dict[str, Any]:
+        # Modern google-genai SDK (preferred) first; fall back to legacy.
+        try:
+            from google import genai as _genai_new  # type: ignore
+            from google.genai import types as _genai_types  # type: ignore
+            client = _genai_new.Client(api_key=api_key)
+            tool_obj = _genai_types.Tool(google_search=_genai_types.GoogleSearch())
+            cfg = _genai_types.GenerateContentConfig(tools=[tool_obj])
+            resp = client.models.generate_content(
+                model=model_name,
+                contents=(
+                    "Use Google Search to find authoritative pages that answer "
+                    f"this query. Return concise URLs + titles. Query: {query}"
+                ),
+                config=cfg,
+            )
+            text = getattr(resp, "text", "") or ""
+            citations: list[dict[str, str]] = []
+            for cand in getattr(resp, "candidates", []) or []:
+                cm = getattr(cand, "grounding_metadata", None)
+                if not cm:
+                    continue
+                for ch in getattr(cm, "grounding_chunks", []) or []:
+                    w = getattr(ch, "web", None)
+                    if w and getattr(w, "uri", None):
+                        citations.append({
+                            "title": str(getattr(w, "title", "") or ""),
+                            "url": str(w.uri),
+                            "snippet": text[:240],
+                        })
+            if citations:
+                return {"backend": "gemini_grounding", "results": citations[:max_results]}
+            return {"error": "gemini_empty"}
+        except ImportError:
+            pass
+        except Exception as e:
+            return {"error": "gemini_failed", "_detail": str(e)}
+        # Legacy google-generativeai fallback.
+        try:
+            import google.generativeai as _genai_legacy  # type: ignore
+        except ImportError:
+            return {"error": "missing_lib"}
+        try:
+            _genai_legacy.configure(api_key=api_key)
+            model_obj = _genai_legacy.GenerativeModel(model_name)
+            response = model_obj.generate_content(
+                f"Search and list source URLs for: {query}",
+                tools=[{"google_search_retrieval": {}}],
+            )
+            text = getattr(response, "text", "") or ""
+            urls = re.findall(r"https?://[^\s)\]]+", text)[:max_results]
+            results = [
+                {"title": "", "url": u, "snippet": text[:240]} for u in urls
+            ]
+            if results:
+                return {"backend": "gemini_grounding", "results": results}
+            return {"error": "gemini_empty"}
+        except Exception as e:
+            return {"error": "gemini_failed", "_detail": str(e)}
+
+    try:
+        return await asyncio.to_thread(_do)
+    except Exception as e:
+        log.info("gemini grounding crashed: %s", e)
+        return {"error": "gemini_crashed", "_detail": str(e)}
+
+
 # ── Backend 0: Tavily (opt-in via TAVILY_API_KEY) ─────────────────────────
 #
 # Tavily returns cleaner markdown than scraped backends and survives
@@ -54,7 +192,6 @@ _BUSY_RESPONSE: dict[str, Any] = {
 # default chain below still works for users who do not opt in.
 
 async def _tavily_search(query: str, max_results: int) -> dict[str, Any]:
-    import os
     key = os.environ.get("TAVILY_API_KEY", "").strip()
     if not key:
         return {"error": "not_configured"}
@@ -273,6 +410,7 @@ async def _wikipedia_search(query: str, max_results: int) -> dict[str, Any]:
 
 BackendFn = Callable[[str, int], Awaitable[dict[str, Any]]]
 _BACKENDS: tuple[BackendFn, ...] = (
+    _gemini_grounding,        # opt-in; silent no-op unless LLM_PROVIDER=gemini
     _tavily_search,           # opt-in; silent no-op when TAVILY_API_KEY is unset
     _ddg_search,
     _googlesearch_search,
@@ -304,16 +442,25 @@ async def web_search(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     max_results = int(args.get("max_results") or 5)
     max_results = max(1, min(10, max_results))
 
+    # In-session TTL cache: cuts redundant traffic when several agents
+    # ask the same question (e.g. strategy and intake both web-search
+    # "Llama-3 fine-tuning best practices" within seconds of each other).
+    cache_key = f"{max_results}|{query.lower()}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return {**cached, "cached": True}
+
     last_internal_error = ""
     for backend in _BACKENDS:
         result = await backend(query, max_results)
         if result.get("results"):
-            # Strip private internal keys before returning to the model.
-            return {
+            payload = {
                 "query": query,
                 "backend": result.get("backend", "unknown"),
                 "results": result["results"],
             }
+            _cache_put(cache_key, payload)
+            return payload
         last_internal_error = result.get("_detail") or result.get("error") or last_internal_error
         log.debug("backend %s did not return results: %s",
                   backend.__name__, result.get("error"))

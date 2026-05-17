@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from typing import Any, Optional
 
 from app.agents.base import BaseAgent
@@ -37,10 +38,19 @@ from app.agents.prompts import AGENTIC_SYSTEM_PROMPT
 from app.agents.providers import stream_chat_async
 from app.events.bus import EventBus
 from app.events.types import AgentEvent
-from app.services import dataset_service, session_service
+from app.services import dataset_service, job_service, session_service
 from app.services import directives as directives_service
 from app.tools.registry import ToolContext, get_tool, llm_tool_schemas, run_tool
 from app.utils.config import settings
+
+
+# Hard-wired stop intent: matches before the LLM ever sees the message.
+# Keeps the bar deliberately tight (the word must lead the message) so it
+# does not hijack natural sentences like "let me know before you stop".
+_STOP_INTENT_RE = re.compile(
+    r"^\s*(stop|abort|cancel|halt|kill)\b",
+    re.IGNORECASE,
+)
 
 
 log = logging.getLogger("finetune-studio.agents.loop")
@@ -112,6 +122,28 @@ class AgenticLoop(BaseAgent):
         if event.kind == "UserMessage":
             text = (event.payload or {}).get("text", "")
             if text:
+                # Hard-wired stop intent: if the message *starts* with a
+                # stop verb and any job is in flight for this session,
+                # signal them all synchronously before the LLM ever
+                # sees the message. This makes "stop" reliable even when
+                # the model would otherwise spend a turn deliberating.
+                if _STOP_INTENT_RE.match(text):
+                    try:
+                        stopped = job_service.stop_all_session_jobs(sid)
+                    except Exception:
+                        log.exception("stop_all_session_jobs failed")
+                        stopped = []
+                    if stopped:
+                        notice = (
+                            f"[system] Hard stop intent detected. Signaled {len(stopped)} "
+                            f"active job(s): {', '.join(stopped)}. Acknowledge to the user "
+                            f"in chat and do NOT restart training unless they explicitly "
+                            f"ask for it again."
+                        )
+                        try:
+                            directives_service.record(sid, notice, scope="global", actor="system")
+                        except Exception:
+                            log.exception("failed to record stop directive")
                 self._inbox.setdefault(sid, asyncio.Queue()).put_nowait(text)
                 # Always record user messages as global directives so
                 # wrapped agents (task_inference, model_selection,

@@ -18,6 +18,7 @@ class SettingsRead(BaseModel):
     llm_base_url: str = ""
     llm_api_key_masked: Optional[str] = None
     llm_api_key_set: bool = False
+    llm_api_keys_count: int = 0  # >1 enables key rotation for higher throughput
     llm_source: Literal["env", "ui", "unset"] = "unset"
 
     hf_token_masked: Optional[str] = None
@@ -34,6 +35,7 @@ class SettingsRead(BaseModel):
 class LLMConfigUpdate(BaseModel):
     provider: Provider
     api_key: Optional[str] = None  # omit to keep the existing key
+    api_keys: Optional[list[str]] = None  # plural: opt-in key rotation for higher RPM/TPM
     model: str = Field(..., min_length=1)
     base_url: Optional[str] = None
 

@@ -508,6 +508,16 @@ async def alchemy_chunk_text(args: dict[str, Any], _ctx: ToolContext) -> dict[st
             "format": {"type": "string"},
             "user_intent": {"type": "string"},
             "max_pairs": {"type": "integer", "default": 12},
+            "running_context": {
+                "type": "string",
+                "description": (
+                    "Cross-chunk continuity hint built from previous chunks: "
+                    "what pairs have been extracted so far. Lets the LLM "
+                    "avoid duplicates and stay on theme across a long doc."
+                ),
+            },
+            "chunk_index": {"type": "integer", "default": 0},
+            "chunk_total": {"type": "integer", "default": 1},
         },
         "required": ["text", "format"],
     },
@@ -517,6 +527,9 @@ async def alchemy_build_restructure_prompt(args: dict[str, Any], _ctx: ToolConte
     text = str(args.get("text") or "")[:12000]
     user_intent = str(args.get("user_intent") or "").strip()
     max_pairs = max(1, int(args.get("max_pairs") or 12))
+    running_context = str(args.get("running_context") or "").strip()
+    chunk_index = int(args.get("chunk_index") or 0)
+    chunk_total = int(args.get("chunk_total") or 1)
 
     spec_by_format = {
         "instruction": (
@@ -550,6 +563,17 @@ async def alchemy_build_restructure_prompt(args: dict[str, Any], _ctx: ToolConte
         f"\nUser intent for this dataset: {user_intent}\n" if user_intent else ""
     )
 
+    context_block = ""
+    if running_context:
+        context_block = (
+            "\n=== ALREADY EXTRACTED (avoid repetition; keep new pairs distinct) ===\n"
+            f"{running_context}\n=== END EXTRACTED ===\n"
+        )
+
+    position_block = (
+        f"\nChunk position: {chunk_index + 1}/{chunk_total}\n" if chunk_total > 1 else ""
+    )
+
     system = (
         "You are a data engineering specialist. Convert raw text into "
         "high-quality fine-tuning pairs. Be faithful to the source - never "
@@ -557,7 +581,7 @@ async def alchemy_build_restructure_prompt(args: dict[str, Any], _ctx: ToolConte
     )
     prompt = (
         f"Convert the SOURCE TEXT into up to {max_pairs} fine-tuning pairs.\n"
-        f"Format: {fmt}\n{spec}\n{intent_block}\n"
+        f"Format: {fmt}\n{spec}\n{intent_block}{position_block}{context_block}\n"
         "Return a single JSON object: {\"pairs\": [...]}\n"
         "Wrap the JSON in a ```json ... ``` fence.\n\n"
         f"=== SOURCE TEXT ===\n{text}\n=== END ==="

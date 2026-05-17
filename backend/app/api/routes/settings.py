@@ -10,7 +10,10 @@ data/.encryption_key (auto-generated).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+import logging
+import os
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -31,6 +34,8 @@ from app.utils import crypto
 from app.utils.config import settings as env_settings
 
 
+log = logging.getLogger("finetune-studio.settings")
+
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
@@ -39,12 +44,84 @@ _DEFAULTS: dict[str, Any] = {
     "llm_model": "",
     "llm_base_url": "",
     "llm_key_enc": "",
+    # JSON-serialised list of encrypted keys. Empty string when only the
+    # singular llm_key_enc is configured. Activates key rotation in
+    # providers._resolve_api_key (one bucket per key = N× effective
+    # throughput on paid tiers / multiple free accounts).
+    "llm_keys_enc": "",
     "hf_token_enc": "",
     "hf_username": None,
     "auto_config_on_upload": True,
     "show_agent_reasoning": True,
     "updated_at": None,
 }
+
+
+def _canon_provider(provider: str | None) -> str:
+    """Mirror the canonicalisation rule in providers._candidate_env_vars."""
+    return (
+        (provider or "")
+        .upper()
+        .replace("-", "_")
+        .replace(".", "_")
+        .replace("/", "_")
+        .replace(" ", "_")
+    )
+
+
+def _apply_keys_to_env(provider: str | None, keys: list[str]) -> None:
+    """Mirror UI-saved plural keys into the env vars that
+    providers._read_multi_keys() looks up. This is the bridge that lets
+    a user enter 3 paid keys in Settings and have the next LLM call
+    actually rotate across them without any provider-side change."""
+    if not provider or not keys:
+        return
+    canon = _canon_provider(provider)
+    joined = ",".join(k for k in keys if k)
+    if not joined:
+        return
+    os.environ[f"{canon}_API_KEYS"] = joined
+    # Also set the generic fallback so callers that don't pass a provider
+    # still hit the rotation pool.
+    os.environ.setdefault("LLM_API_KEYS", joined)
+
+
+def _clear_keys_from_env(provider: str | None) -> None:
+    if not provider:
+        return
+    canon = _canon_provider(provider)
+    os.environ.pop(f"{canon}_API_KEYS", None)
+
+
+def _decode_keys_enc(blob: str) -> list[str]:
+    if not blob:
+        return []
+    try:
+        encoded = json.loads(blob)
+        if not isinstance(encoded, list):
+            return []
+        out: list[str] = []
+        for e in encoded:
+            if not isinstance(e, str):
+                continue
+            try:
+                dec = crypto.decrypt(e)
+            except Exception:
+                continue
+            if dec:
+                out.append(dec)
+        return out
+    except Exception:
+        return []
+
+
+def _encode_keys_enc(keys: list[str]) -> str:
+    encoded = []
+    for k in keys:
+        if not k:
+            continue
+        encoded.append(crypto.encrypt(k))
+    return json.dumps(encoded)
 
 
 def _load_raw() -> dict[str, Any]:
@@ -66,6 +143,7 @@ class LLMConfig:
     model: str
     base_url: str
     source: Literal["env", "ui", "unset"]
+    api_keys: list[str] = field(default_factory=list)
 
 
 def _has_required_key(provider: str | None, api_key: str) -> bool:
@@ -81,11 +159,21 @@ def get_llm_config() -> LLMConfig:
     s = _load_raw()
     ui_provider = s.get("llm_provider")
     ui_key = crypto.decrypt(s.get("llm_key_enc", "")) if s.get("llm_key_enc") else ""
+    ui_keys = _decode_keys_enc(s.get("llm_keys_enc", ""))
     ui_model = s.get("llm_model") or ""
     ui_base = s.get("llm_base_url") or ""
-    if ui_provider and ui_model and _has_required_key(ui_provider, ui_key):
+    if ui_provider and ui_model and _has_required_key(ui_provider, ui_key or (ui_keys[0] if ui_keys else "")):
+        # Prefer the plural list's first entry as the singular fallback if
+        # only plural keys are configured (e.g. user pasted three keys
+        # without setting a single api_key).
+        canonical_single = ui_key or (ui_keys[0] if ui_keys else "")
         return LLMConfig(
-            provider=ui_provider, api_key=ui_key, model=ui_model, base_url=ui_base, source="ui",
+            provider=ui_provider,
+            api_key=canonical_single,
+            model=ui_model,
+            base_url=ui_base,
+            source="ui",
+            api_keys=ui_keys,
         )
     if env_settings.llm_provider and env_settings.llm_model and _has_required_key(
         env_settings.llm_provider, env_settings.llm_api_key,
@@ -98,6 +186,18 @@ def get_llm_config() -> LLMConfig:
             source="env",
         )
     return LLMConfig(provider=None, api_key="", model="", base_url="", source="unset")
+
+
+def get_llm_keys() -> list[str]:
+    """Public accessor used by providers._resolve_api_key.
+
+    Returns the plural key list when the user has saved more than one,
+    else an empty list (caller should fall back to env vars / singular
+    key). Lives here so providers.py doesn't have to know about
+    encryption or the settings file layout.
+    """
+    cfg = get_llm_config()
+    return list(cfg.api_keys)
 
 
 def get_hf_token_resolved() -> tuple[str, Literal["env", "ui", "unset"]]:
@@ -126,6 +226,7 @@ def _redact() -> SettingsRead:
         llm_base_url=llm.base_url,
         llm_api_key_masked=crypto.mask(llm.api_key) or None,
         llm_api_key_set=bool(llm.api_key),
+        llm_api_keys_count=len(llm.api_keys),
         llm_source=llm.source,
         hf_token_masked=crypto.mask(hf_token) or None,
         hf_token_set=bool(hf_token),
@@ -183,6 +284,15 @@ def set_llm(payload: LLMConfigUpdate) -> SettingsRead:
     s["llm_base_url"] = payload.base_url or ""
     if payload.api_key is not None:
         s["llm_key_enc"] = crypto.encrypt(payload.api_key) if payload.api_key else ""
+    if payload.api_keys is not None:
+        clean_keys = [k.strip() for k in payload.api_keys if k and k.strip()]
+        s["llm_keys_enc"] = _encode_keys_enc(clean_keys) if clean_keys else ""
+        # Best-effort: keep the singular key in sync with the first plural
+        # so legacy callers still see *something* if they bypass rotation.
+        if clean_keys and not s.get("llm_key_enc"):
+            s["llm_key_enc"] = crypto.encrypt(clean_keys[0])
+        # Apply to env immediately so the next LLM call rotates.
+        _apply_keys_to_env(payload.provider, clean_keys)
     _save_raw(s)
     return _redact()
 
@@ -190,12 +300,32 @@ def set_llm(payload: LLMConfigUpdate) -> SettingsRead:
 @router.delete("/llm", response_model=SettingsRead)
 def clear_llm() -> SettingsRead:
     s = _load_raw()
+    provider = s.get("llm_provider")
     s["llm_provider"] = None
     s["llm_model"] = ""
     s["llm_base_url"] = ""
     s["llm_key_enc"] = ""
+    s["llm_keys_enc"] = ""
     _save_raw(s)
+    _clear_keys_from_env(provider)
     return _redact()
+
+
+# ── Module-load: restore env-var bridge from saved settings ────────────────
+#
+# When the process boots, mirror any UI-saved plural keys into the env vars
+# that providers._read_multi_keys() consults. This makes the rotation
+# functional from the very first LLM call even on a cold restart, without
+# requiring the user to re-save their settings.
+try:
+    _boot_s = _load_raw()
+    _boot_keys = _decode_keys_enc(_boot_s.get("llm_keys_enc", ""))
+    if _boot_keys:
+        _apply_keys_to_env(_boot_s.get("llm_provider"), _boot_keys)
+        log.info("Restored %d plural API key(s) to env for provider=%s",
+                 len(_boot_keys), _boot_s.get("llm_provider"))
+except Exception:
+    log.exception("Failed to restore plural API keys from settings at boot")
 
 
 @router.post("/hf-token", response_model=SettingsRead)

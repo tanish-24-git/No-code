@@ -17,13 +17,21 @@ from app.agents.schemas import StrategyChoice
 from app.events.types import AgentEvent
 from app.services import decision_log, session_service
 from app.services import directives as directives_service
+from app.utils.hardware import clamp_strategy_to_vram
 
 
 class TrainingStrategyAgent(BaseAgent):
     name = "TrainingStrategyAgent"
     role = "Choose training strategy + estimate runtime."
     directive_scope = "strategy"
-    allowed_tools = ("strategy.choose", "strategy.estimate_runtime", "audit.write")
+    allowed_tools = (
+        "strategy.choose",
+        "strategy.estimate_runtime",
+        "hardware.vram_budget",  # programmatic OOM guard (#2)
+        "web_search",            # look up recent fine-tuning techniques (#8)
+        "model.search_hf",       # verify chosen base model still exists (#8)
+        "audit.write",
+    )
     triggers = ("CandidateModelsRanked",)
 
     async def handle(self, event: AgentEvent) -> None:
@@ -99,6 +107,37 @@ class TrainingStrategyAgent(BaseAgent):
         # Apply directive overrides (LLM might have ignored them - we
         # belt-and-suspenders here).
         self._apply_directive_overrides(session_id, strategy)
+
+        # Programmatic VRAM clamp. The LLM-proposed batch/seq_len are
+        # estimated against the user's actual GPU; if they don't fit
+        # within 85%% of available VRAM we halve them deterministically
+        # until they do. Prevents CUDA OOM mid-run on consumer GPUs.
+        try:
+            model_repo = chosen_model.get("repo_id") or ""
+            clamp_strategy_to_vram(strategy, model_repo)
+            clamp_info = strategy.pop("_vram_clamp", None)
+            if clamp_info:
+                frm = clamp_info["from"]
+                to = clamp_info["to"]
+                budget = clamp_info.get("budget", {})
+                await self.emit_message(
+                    session_id,
+                    f"VRAM clamp: requested batch={frm['batch_size']} "
+                    f"seq_len={frm['max_seq_len']} needed "
+                    f"~{budget.get('required_gb', '?')}GB; GPU has "
+                    f"{budget.get('available_gb', '?')}GB. Clamped to "
+                    f"batch={to['batch_size']} seq_len={to['max_seq_len']}.",
+                    parent=event.id,
+                )
+                strategy["rationale"] = (strategy.get("rationale") or "") + (
+                    f" [VRAM clamp applied: bs {frm['batch_size']}->"
+                    f"{to['batch_size']}, seq {frm['max_seq_len']}->{to['max_seq_len']}]"
+                )
+        except Exception:
+            # Clamp is best-effort: a model-card lookup failure should not
+            # block the run. trainer.py still has a CPU Safe-Mode guard
+            # for the worst case.
+            pass
 
         runtime = await self.call_tool(
             "strategy.estimate_runtime",
