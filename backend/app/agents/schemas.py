@@ -31,30 +31,117 @@ class LLMSchemaError(Exception):
     """Raised when an LLM response can't be parsed against its expected schema."""
 
 
+def _walk_balanced_json(raw: str) -> list[str]:
+    """Find every substring that begins with '{' or '[' and contains a
+    balanced JSON value, respecting strings + escapes.
+
+    The previous parser used a greedy ``\\{[\\s\\S]*\\}`` regex which
+    merged conversational prose with the actual JSON when the LLM
+    "thought out loud" before emitting its answer. This walker is
+    bracket-aware, so prose that happens to contain a stray ``{`` does
+    NOT pull in everything up to the last ``}`` of the real JSON.
+
+    For truncated responses (LLM hit max_tokens mid-object), we append
+    closers for the still-open structures so the salvage attempt has
+    a chance.
+
+    Candidates are returned in document order. Caller is responsible
+    for deciding which one validates.
+    """
+    candidates: list[str] = []
+    n = len(raw)
+    i = 0
+    while i < n:
+        ch = raw[i]
+        if ch not in ("{", "["):
+            i += 1
+            continue
+        # Walk forward, tracking the opener stack so we can produce
+        # type-correct closers if truncated.
+        stack: list[str] = []
+        in_str = False
+        escape = False
+        j = i
+        found_close = False
+        while j < n:
+            c = raw[j]
+            if in_str:
+                if escape:
+                    escape = False
+                elif c == "\\":
+                    escape = True
+                elif c == '"':
+                    in_str = False
+            else:
+                if c == '"':
+                    in_str = True
+                elif c == "{":
+                    stack.append("{")
+                elif c == "[":
+                    stack.append("[")
+                elif c == "}":
+                    if stack and stack[-1] == "{":
+                        stack.pop()
+                    if not stack:
+                        candidates.append(raw[i:j + 1])
+                        found_close = True
+                        break
+                elif c == "]":
+                    if stack and stack[-1] == "[":
+                        stack.pop()
+                    if not stack:
+                        candidates.append(raw[i:j + 1])
+                        found_close = True
+                        break
+            j += 1
+        if not found_close and stack:
+            # Truncated mid-object. Best-effort: append matching
+            # closers in reverse order so json.loads at least attempts
+            # to decode.
+            closers = "".join("}" if op == "{" else "]" for op in reversed(stack))
+            candidates.append(raw[i:] + closers)
+            break  # nothing more to walk past truncation
+        i = (j + 1) if found_close else n
+    return candidates
+
+
 def parse_llm_json(raw: str, schema: Type[T]) -> T:
     """Extract the first JSON object/array from ``raw`` and validate it.
 
-    Tolerates: markdown fences (```json ... ```), surrounding prose,
-    trailing commentary. Raises ``LLMSchemaError`` with a helpful message
-    if no valid JSON matching the schema is found.
+    Tolerates: markdown fences (```json ... ```), prose-around-JSON,
+    stray braces inside the LLM's "thinking", and truncated output
+    (LLM hit max_tokens). Raises ``LLMSchemaError`` with a helpful
+    message if no valid JSON matching the schema is found.
     """
     if not raw:
         raise LLMSchemaError("empty LLM response")
 
-    blocks = []
-    fence = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", raw)
-    if fence:
-        blocks.append(fence.group(1))
-    # Greedy outermost match is what we want; LLMs often wrap the JSON in prose.
-    obj = re.search(r"\{[\s\S]*\}", raw)
-    if obj:
-        blocks.append(obj.group(0))
-    arr = re.search(r"\[[\s\S]*\]", raw)
-    if arr:
-        blocks.append(arr.group(0))
+    candidates: list[str] = []
+
+    # 1. Fenced code block: the LLM explicitly marked its JSON. Prefer
+    #    this over anything else — if it's there, the LLM is telling us
+    #    where to look. Also accept nested fences (the model sometimes
+    #    wraps prose AND a fenced JSON together).
+    for m in re.finditer(r"```(?:json)?\s*([\s\S]+?)\s*```", raw):
+        candidates.append(m.group(1).strip())
+
+    # 2. Balanced-brace walker: respects strings and escapes, so prose
+    #    containing "{" does not poison the parse.
+    candidates.extend(_walk_balanced_json(raw))
+
+    if not candidates:
+        raise LLMSchemaError(
+            f"no JSON object found in LLM response (first 200 chars: "
+            f"{raw[:200]!r})"
+        )
+
+    # Try the longest candidates first — when there are multiple, the
+    # actual answer is almost always the biggest balanced structure;
+    # short ones are usually the LLM's commentary like {"step": "1"}.
+    candidates.sort(key=len, reverse=True)
 
     last_err: Optional[Exception] = None
-    for block in blocks:
+    for block in candidates:
         try:
             data = json.loads(block)
         except json.JSONDecodeError as e:
@@ -68,7 +155,8 @@ def parse_llm_json(raw: str, schema: Type[T]) -> T:
 
     raise LLMSchemaError(
         f"could not parse LLM response as {schema.__name__}: "
-        f"{last_err.__class__.__name__ if last_err else 'no JSON found'}"
+        f"{last_err.__class__.__name__ if last_err else 'no JSON found'}: "
+        f"{str(last_err)[:200] if last_err else ''}"
     )
 
 

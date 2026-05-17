@@ -649,16 +649,28 @@ class BaseAgent:
         # whatever casing the prompt uses (e.g. "QLoRA"), which Pydantic
         # Literal validators reject case-sensitively.
         schema_block = _format_schema_for_prompt(schema)
-        attempt_prompt = (
-            prompt
-            + "\n\n=== RESPONSE SCHEMA ===\n"
+        strict_footer = (
+            "\n\n=== RESPONSE SCHEMA ===\n"
             + schema_block
             + "\n=== END SCHEMA ===\n\n"
-            "Return ONLY a single JSON object inside a ```json ... ``` "
-            "fence that satisfies the schema above. Enum / Literal "
-            "fields are CASE-SENSITIVE — use the exact lowercase values "
-            "shown. No extra prose."
+            "OUTPUT FORMAT — read carefully:\n"
+            "1. Your reply MUST start with the marker `<<<JSON>>>` and end "
+            "with `<<<END>>>`.\n"
+            "2. Between those markers, emit EXACTLY ONE fenced "
+            "```json ... ``` block. Nothing else.\n"
+            "3. Do NOT write explanations, preambles, 'let me think', "
+            "'here is the JSON', commentary, or analysis outside the "
+            "fence. Anything outside the markers is discarded.\n"
+            "4. Enum / Literal values are CASE-SENSITIVE — use the exact "
+            "lowercase strings shown in the schema above.\n"
+            "5. If you are streaming thoughts, finish them BEFORE the "
+            "`<<<JSON>>>` marker — never interleave thinking with JSON.\n"
+            "6. The JSON object must be complete and balanced; do not "
+            "truncate it. If it would exceed your output budget, shorten "
+            "string fields (especially 'rationale') rather than omit "
+            "closing braces."
         )
+        attempt_prompt = prompt + strict_footer
         last_parse_error: Optional[str] = None
         for i in range(max_retries + 1):
             raw = await self.call_llm(
@@ -699,13 +711,13 @@ class BaseAgent:
                     return None
                 attempt_prompt = (
                     prompt
-                    + "\n\n=== RESPONSE SCHEMA ===\n"
-                    + schema_block
-                    + "\n=== END SCHEMA ===\n\n"
-                    f"Your previous reply was not valid {schema.__name__} JSON: "
-                    f"{e}. Pay close attention to the Literal/enum fields "
-                    "above (case-sensitive). Try again and return ONLY a "
-                    "fenced JSON object."
+                    + strict_footer
+                    + f"\n\nRETRY: your previous reply was not valid "
+                    f"{schema.__name__} JSON: {e}. Common causes: emitted "
+                    "prose before/after the fence, truncated mid-object "
+                    "(ran out of output tokens), or used uppercase enum "
+                    "values. Fix and re-emit ONLY the fenced JSON inside "
+                    "<<<JSON>>> / <<<END>>> markers."
                 )
         return None
 
