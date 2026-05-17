@@ -629,10 +629,22 @@ class BaseAgent:
         Returns None if no provider is configured OR all retries fail.
         Callers decide whether to fall back to a deterministic computation.
         """
+        # Inject the actual JSON schema so the LLM doesn't have to guess
+        # field names or enum casing. This is the single most effective
+        # defence against cascading validation failures in StrategyChoice,
+        # GraphProposal, RecoveryPlan, etc. — without it the model mirrors
+        # whatever casing the prompt uses (e.g. "QLoRA"), which Pydantic
+        # Literal validators reject case-sensitively.
+        schema_block = _format_schema_for_prompt(schema)
         attempt_prompt = (
             prompt
-            + "\n\nReturn ONLY a single JSON object inside a ```json ... ``` "
-            "fence. No extra prose."
+            + "\n\n=== RESPONSE SCHEMA ===\n"
+            + schema_block
+            + "\n=== END SCHEMA ===\n\n"
+            "Return ONLY a single JSON object inside a ```json ... ``` "
+            "fence that satisfies the schema above. Enum / Literal "
+            "fields are CASE-SENSITIVE — use the exact lowercase values "
+            "shown. No extra prose."
         )
         for i in range(max_retries + 1):
             raw = await self.call_llm(
@@ -654,10 +666,77 @@ class BaseAgent:
                     return None
                 attempt_prompt = (
                     prompt
-                    + f"\n\nYour previous reply was not valid {schema.__name__} JSON: "
-                    f"{e}. Try again and return ONLY a fenced JSON object."
+                    + "\n\n=== RESPONSE SCHEMA ===\n"
+                    + schema_block
+                    + "\n=== END SCHEMA ===\n\n"
+                    f"Your previous reply was not valid {schema.__name__} JSON: "
+                    f"{e}. Pay close attention to the Literal/enum fields "
+                    "above (case-sensitive). Try again and return ONLY a "
+                    "fenced JSON object."
                 )
         return None
+
+
+def _format_schema_for_prompt(schema: Type[BaseModel]) -> str:
+    """Render a compact prompt-ready view of a pydantic schema.
+
+    We do not dump the full JSON Schema (it can be 100+ lines for nested
+    models and burns prompt budget for little gain). Instead we extract
+    just the surface every Literal/enum LLM mistake hits: field name,
+    type hint, default, and the exact list of valid enum values.
+    """
+    try:
+        full = schema.model_json_schema()
+    except Exception:
+        return f"(could not introspect {schema.__name__})"
+
+    lines: list[str] = []
+    defs = full.get("$defs") or full.get("definitions") or {}
+
+    def _resolve(ref: str) -> dict[str, Any]:
+        key = ref.rsplit("/", 1)[-1]
+        return defs.get(key) or {}
+
+    def _describe_type(field_schema: dict[str, Any]) -> str:
+        if "enum" in field_schema:
+            vals = field_schema["enum"]
+            return "enum: " + " | ".join(repr(v) for v in vals)
+        if "const" in field_schema:
+            return f"const {field_schema['const']!r}"
+        if "anyOf" in field_schema:
+            return " or ".join(_describe_type(v) for v in field_schema["anyOf"])
+        if "$ref" in field_schema:
+            ref_schema = _resolve(field_schema["$ref"])
+            if "enum" in ref_schema:
+                return "enum: " + " | ".join(repr(v) for v in ref_schema["enum"])
+            return ref_schema.get("title", "object")
+        t = field_schema.get("type")
+        if t == "array":
+            items = field_schema.get("items") or {}
+            return f"array<{_describe_type(items)}>"
+        if t == "object":
+            return "object"
+        if isinstance(t, list):
+            return " or ".join(t)
+        return t or "any"
+
+    props = full.get("properties") or {}
+    required = set(full.get("required") or [])
+    for name, spec in props.items():
+        req = " (required)" if name in required else ""
+        default = spec.get("default", "<no default>")
+        type_desc = _describe_type(spec)
+        desc = spec.get("description") or ""
+        line = f"- {name}: {type_desc}{req}, default={default!r}"
+        if desc:
+            line += f"  // {desc[:80]}"
+        lines.append(line)
+
+    # Cap at a sane budget so deeply-nested models don't blow context.
+    body = "\n".join(lines[:60])
+    if len(lines) > 60:
+        body += f"\n... ({len(lines) - 60} more fields elided)"
+    return f"Schema: {schema.__name__}\n{body}"
 
 
 def _normalize_md(text: str) -> str:

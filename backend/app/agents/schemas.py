@@ -21,7 +21,7 @@ import json
 import re
 from typing import Any, Literal, Optional, Type, TypeVar
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 
 T = TypeVar("T", bound=BaseModel)
@@ -117,6 +117,39 @@ class StrategyChoice(BaseModel):
     lora_dropout: float = 0.05
     early_stopping: bool = True
     rationale: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_enum_casing(cls, data: Any) -> Any:
+        """Lowercase the enum-typed string fields BEFORE Literal validation.
+
+        LLMs commonly mirror the casing of technique names in the prompt
+        ('QLoRA', 'GaLore', 'BF16'). The Literal validators are strict
+        lowercase. Without this pre-pass, a single capital letter
+        deadlocks the entire pipeline because TrainingStrategyAgent
+        bails when call_llm_typed returns None.
+
+        Also maps common synonyms the LLM emits but the schema doesn't
+        list (e.g. 'qlora_4bit' -> 'qlora', 'nf4' -> 'int4').
+        """
+        if not isinstance(data, dict):
+            return data
+        synonyms = {
+            "qlora_4bit": "qlora",
+            "qlora-4bit": "qlora",
+            "nf4": "int4",
+            "4-bit": "4bit",
+            "8-bit": "8bit",
+        }
+        for key in (
+            "method", "adapter_variant", "precision", "quantization",
+            "kernel_pack", "optimizer",
+        ):
+            v = data.get(key)
+            if isinstance(v, str):
+                vl = v.strip().lower()
+                data[key] = synonyms.get(vl, vl)
+        return data
 
 
 class GraphNode(BaseModel):
