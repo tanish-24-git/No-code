@@ -248,7 +248,7 @@ export default function SettingsPage() {
                   Free-tier users can pool multiple free accounts; paid-tier users with a
                   single key can leave this blank and either raise the limits in
                   <code className="px-1 mx-1 py-0.5 rounded bg-white/5 border border-white/10 text-white/80 font-mono">data/provider_limits.json</code>
-                  or just let the provider's 429s drive the gate.
+                  or just let the provider&apos;s 429s drive the gate.
                 </div>
               </div>
             )}
