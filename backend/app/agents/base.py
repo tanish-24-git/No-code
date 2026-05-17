@@ -557,6 +557,12 @@ class BaseAgent:
             api_key = settings.llm_api_key or ""
 
         if not provider or not model:
+            await self.emit_error(
+                session_id,
+                "LLM call aborted: no provider/model configured. "
+                "Open Settings and set LLM_PROVIDER + LLM_MODEL + API key, "
+                "then retry.",
+            )
             return ""
 
         # Tier routing: optionally swap to a cheaper same-provider model
@@ -604,6 +610,13 @@ class BaseAgent:
             log.warning("call_llm failed: %s", e)
             if stream_thoughts:
                 await self.think_delta(session_id, "", is_final=True, parent=parent)
+            # Always surface LLM failures to the UI. The full provider
+            # message is preserved verbatim — context-length errors,
+            # 429s, invalid keys, and network blips all read clearly.
+            await self.emit_error(
+                session_id,
+                _classify_llm_error(e, provider=provider, model=model),
+            )
             return full_text
 
         if stream_thoughts:
@@ -646,6 +659,7 @@ class BaseAgent:
             "fields are CASE-SENSITIVE — use the exact lowercase values "
             "shown. No extra prose."
         )
+        last_parse_error: Optional[str] = None
         for i in range(max_retries + 1):
             raw = await self.call_llm(
                 session_id, attempt_prompt,
@@ -656,13 +670,32 @@ class BaseAgent:
                 tier=tier,
             )
             if not raw:
+                # call_llm already emitted a UI-visible error (no provider
+                # configured, stream exception). Caller decides next steps.
                 return None
             try:
                 return parse_llm_json(raw, schema)
             except LLMSchemaError as e:
+                last_parse_error = str(e)
                 if i == max_retries:
                     log.info("call_llm_typed gave up parsing %s after %d tries: %s",
                              schema.__name__, max_retries + 1, e)
+                    # Surface the schema failure to the UI so the user
+                    # sees WHY the agent stalled (which field was wrong,
+                    # which enum value mismatched, etc.).
+                    snippet = (raw or "").strip()
+                    if len(snippet) > 400:
+                        snippet = snippet[:400] + "..."
+                    await self.emit_error(
+                        session_id,
+                        f"[{self.name}] LLM returned an invalid "
+                        f"{schema.__name__} JSON after {max_retries + 1} "
+                        f"attempt(s). Parse error: {last_parse_error}. "
+                        f"This usually means the model is hitting its "
+                        f"context limit, has weak JSON-mode support, or "
+                        f"misread the schema. First 400 chars of the "
+                        f"final reply: {snippet}",
+                    )
                     return None
                 attempt_prompt = (
                     prompt
@@ -675,6 +708,87 @@ class BaseAgent:
                     "fenced JSON object."
                 )
         return None
+
+
+def _classify_llm_error(e: Exception, *, provider: str = "", model: str = "") -> str:
+    """Translate a provider exception into a user-readable chat message.
+
+    Pattern-matches the most common signals from the OpenAI, Anthropic,
+    and Gemini SDKs (status codes embedded in the str, error type
+    names, key substrings). Falls back to the raw exception message
+    so the user always sees the underlying cause — never a generic
+    "AI failed" placeholder.
+    """
+    msg = str(e)
+    low = msg.lower()
+    tag = f"[{provider}/{model}] " if provider else ""
+
+    # Rate-limit / quota
+    if any(s in low for s in (
+        "rate limit", "rate_limit", "ratelimit", "429",
+        "tokens per minute", "tokens-per-minute", "tpm",
+        "requests per minute", "rpm", "quota", "exceeded",
+        "resource_exhausted", "throttle",
+    )):
+        return (
+            f"{tag}Provider rate limit hit: {msg}. Wait ~60s and try again, "
+            f"add more keys in Settings → 'multiple-key rotation', or "
+            f"upgrade your tier."
+        )
+
+    # Context-length / token-budget
+    if any(s in low for s in (
+        "context length", "context_length", "context window",
+        "maximum context", "max_tokens", "too long",
+        "prompt is too long", "context limit",
+    )):
+        return (
+            f"{tag}Context window exceeded: {msg}. The conversation has "
+            f"grown past this model's max input. Start a fresh session, "
+            f"or switch to a larger-context model in Settings."
+        )
+
+    # Auth / key
+    if any(s in low for s in (
+        "401", "403", "unauthorized", "forbidden",
+        "invalid api key", "invalid_api_key", "authentication",
+        "permission denied", "api key not valid",
+    )):
+        return (
+            f"{tag}Authentication failed: {msg}. Check the API key in "
+            f"Settings — it may be invalid, revoked, or missing the "
+            f"permission scope the model requires."
+        )
+
+    # Model not found / unsupported
+    if any(s in low for s in (
+        "model not found", "model_not_found", "unknown model",
+        "does not exist", "not supported",
+    )):
+        return (
+            f"{tag}Model unavailable: {msg}. Verify the model id in "
+            f"Settings — typos and deprecated ids are the usual cause."
+        )
+
+    # Network / connectivity
+    if any(s in low for s in (
+        "connection", "timeout", "timed out", "dns",
+        "name resolution", "unreachable", "refused",
+    )):
+        return (
+            f"{tag}Network error reaching the provider: {msg}. Check "
+            f"your internet connection or the provider's status page."
+        )
+
+    # Server / 5xx
+    if any(s in low for s in ("500", "502", "503", "504", "internal server", "service unavailable")):
+        return (
+            f"{tag}Provider server error: {msg}. The provider is having "
+            f"trouble; retry in a minute."
+        )
+
+    # Default — show the raw exception so the user still sees the cause.
+    return f"{tag}LLM call failed: {msg}"
 
 
 def _format_schema_for_prompt(schema: Type[BaseModel]) -> str:

@@ -105,22 +105,21 @@ class TrainingStrategyAgent(BaseAgent):
         if llm_proposal:
             strategy = llm_proposal.model_dump()
         else:
-            # Safety net: the LLM call failed (no provider, repeated bad
-            # JSON, transient error). Rather than bail the pipeline into a
-            # deadlock — the previous behaviour, which left the frontend
-            # spinning forever — we synthesize a known-safe default from
-            # the user's hardware + chosen model. The user sees a clear
-            # message and can comment to override anything they don't
-            # like, which is the normal flow anyway.
-            strategy = self._safe_default_strategy(chosen_model, hw, priority)
-            await self.emit_message(
+            # No hardcoded strategy fallback. call_llm_typed already
+            # surfaced the underlying LLM error to the UI (provider
+            # rate limit, context limit, invalid API key, schema parse
+            # failure). We bail with an agent-scoped error so the user
+            # knows which step needs attention.
+            await self.emit_error(
                 session_id,
-                "The LLM strategy planner did not return a valid response, "
-                "so I picked a conservative default based on your hardware. "
-                "Review the values below and comment to change anything "
-                "(e.g. 'use 5 epochs', 'switch to qlora').",
-                parent=event.id,
+                f"[{self.name}] Could not produce a StrategyChoice. "
+                "See the LLM error above for the root cause. Fix the "
+                "provider issue (API key, rate limit, context length) "
+                "and retry by commenting on the model card, or paste a "
+                "concrete strategy (e.g. 'use qlora with 3 epochs and "
+                "batch=2').",
             )
+            return
 
         # Apply directive overrides (LLM might have ignored them - we
         # belt-and-suspenders here).
@@ -254,69 +253,6 @@ class TrainingStrategyAgent(BaseAgent):
             parent_event_id=event.id,
             decision_id=d.id,
         )
-
-    def _safe_default_strategy(
-        self,
-        chosen_model: dict,
-        hw: dict,
-        priority: str,
-    ) -> dict:
-        """Synthesize a conservative-but-functional StrategyChoice when the
-        LLM planner fails. Used to prevent the pipeline from deadlocking
-        on a typed-LLM validation failure.
-
-        The defaults are intentionally conservative — small batch, short
-        seq, LoRA (not QLoRA) — so they fit on almost any GPU. The user
-        can comment to upgrade once the strategy card renders.
-        """
-        vram_gb = float(hw.get("vram_gb") or 0.0)
-        device = (hw.get("device") or "cpu").lower()
-        params_b = float(chosen_model.get("params_b") or 7.0)
-
-        # Method: QLoRA only when VRAM is genuinely tight; otherwise LoRA.
-        method = "lora"
-        quantization = "none"
-        if device == "cuda" and vram_gb and (vram_gb < 12 or params_b >= 13):
-            method = "qlora"
-            quantization = "int4"
-
-        # Precision: bf16 on CUDA, fp32 elsewhere.
-        precision = "bf16" if device == "cuda" else "fp32"
-
-        # Batch / seq scale down with VRAM. On CPU we go absolute floor.
-        if device != "cuda":
-            batch_size, max_seq_len, grad_accum = 1, 512, 8
-        elif vram_gb >= 24:
-            batch_size, max_seq_len, grad_accum = 4, 2048, 2
-        elif vram_gb >= 12:
-            batch_size, max_seq_len, grad_accum = 2, 1024, 4
-        else:
-            batch_size, max_seq_len, grad_accum = 1, 768, 8
-
-        return {
-            "method": method,
-            "adapter_variant": "none",
-            "precision": precision,
-            "quantization": quantization,
-            "kernel_pack": "standard",
-            "use_unsloth": False,
-            "optimizer": "adamw",
-            "use_liger": False,
-            "batch_size": batch_size,
-            "gradient_accumulation": grad_accum,
-            "max_seq_len": max_seq_len,
-            "learning_rate": 2e-4,
-            "epochs": 3 if priority == "quality" else 1,
-            "lora_rank": 16,
-            "lora_alpha": 32,
-            "lora_dropout": 0.05,
-            "early_stopping": True,
-            "rationale": (
-                "Safe-default fallback (LLM planner unavailable). "
-                f"Picked for device={device}, vram={vram_gb}GB, "
-                f"model={params_b}B, priority={priority}."
-            ),
-        }
 
     def _user_priority(self, session) -> str | None:
         for a in reversed(session.clarifications):

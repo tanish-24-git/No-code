@@ -53,26 +53,22 @@ class ModelSelectionAgent(BaseAgent):
         if session.artifacts.get("chosen_model"):
             return  # Already settled.
 
-        # If task_inference hasn't run yet (no explicit user goal, or upstream
-        # bailed), DO NOT silently skip — that used to cascade into
-        # pipeline_builder seeing chosen_model=None and crashing. Synthesize
-        # a conservative default and continue; user can comment to refine.
+        # No hardcoded task default. If task_inference hasn't been
+        # written, the upstream TaskInferenceAgent already surfaced its
+        # failure to the UI (rate limit, context limit, missing provider).
+        # We make that visible AGAIN at the model-selection scope so the
+        # user knows which step is blocked, and stop. No synthetic
+        # guesses about what the user intended.
         if not task:
-            task = {
-                "chosen": "instruction",
-                "scores": {"instruction": 0.5},
-                "confidence": 0.5,
-                "synthetic": True,
-                "rationale": "Default task — task_inference hadn't run yet.",
-            }
-            session_service.attach_artifact(session, "task_inference", task)
-            await self.think(
+            await self.emit_error(
                 session_id,
-                "No explicit task inference available yet — defaulting to "
-                "'instruction' for the model search. You can refine this "
-                "by commenting on the strategy card later.",
-                parent=event.id,
+                f"[{self.name}] Cannot search for a base model: "
+                "task_inference artifact is missing. The previous "
+                "TaskInferenceAgent step did not complete — see the LLM "
+                "error above (rate limit, context limit, or missing "
+                "API key) and retry by commenting on the dataset.",
             )
+            return
 
         await self.materialize_node(
             session_id,

@@ -77,45 +77,21 @@ class TaskInferenceAgent(BaseAgent):
             parent=event.id,
         )
 
-        # Deterministic fallback: when no LLM provider is configured or the
-        # LLM repeatedly returns invalid JSON, fall through to the
-        # task.classify tool so the pipeline can keep moving. Better a
-        # low-confidence default than a silent skip.
+        # No hardcoded fallback. If the LLM didn't return a valid task
+        # inference, call_llm_typed has already emitted a UI-visible
+        # error (with the actual provider message — rate limit, context
+        # limit, parse failure, etc.). Surface a final agent-scoped
+        # error so the user knows which step failed, then return.
         if not proposal:
-            try:
-                fallback = await self.call_tool(
-                    "task.classify",
-                    {"buckets": buckets, "imbalance": imbalance, "info": info},
-                    session_id,
-                )
-                chosen_fb = (fallback or {}).get("chosen") or "instruction"
-                if chosen_fb in CANONICAL_TASKS:
-                    proposal = TaskInferenceResult(
-                        chosen=chosen_fb,
-                        scores={chosen_fb: 0.5},
-                        confidence=0.5,
-                        rationale="Deterministic fallback: task.classify (LLM unavailable).",
-                    )
-            except Exception:
-                pass
-
-        # Absolute floor: never leave the chain without SOME task inference.
-        # A wrong-but-safe guess ("instruction") is better than a deadlock;
-        # the user can comment to redirect and the loop will re-run this
-        # agent on the next UserClarificationReceived event.
-        if not proposal:
-            proposal = TaskInferenceResult(
-                chosen="instruction",
-                scores={"instruction": 0.4},
-                confidence=0.4,
-                rationale=(
-                    "Floor default: neither LLM nor deterministic classifier "
-                    "produced a result. Configure an LLM provider or "
-                    "comment on this card to refine."
-                ),
+            await self.emit_error(
+                session_id,
+                f"[{self.name}] Could not produce a TaskInferenceResult. "
+                "See the LLM error above; fix the underlying cause "
+                "(API key, rate limit, context length) and retry by "
+                "commenting on this dataset.",
             )
+            return
 
-        # Guaranteed non-None by the floor default above.
         chosen = proposal.chosen.lower()
         if chosen not in CANONICAL_TASKS:
             chosen = "instruction"
