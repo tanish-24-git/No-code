@@ -495,50 +495,55 @@ def _is_tool_result_message(m: dict[str, Any]) -> bool:
 def _compact_messages(
     messages: list[dict[str, Any]], *, keep_last_k: int,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Rolling-window compaction.
+    """Rolling-window compaction that respects native tool-call sequences.
 
     Keeps:
         - the very first user message (initial intent)
-        - every real (non-tool-result) user message (interrupts / directives)
-        - the last ``keep_last_k * 2`` messages (last K assistant + tool-result pairs)
+        - every real user message (interrupts / directives)
+        - the last K 'logical turns'. A turn is defined as an assistant message 
+          (with or without tool_calls) followed by its tool results and 
+          any subsequent user response.
 
-    Drops older assistant turns and older tool-result synthetic messages,
-    replacing them with a short note in the returned rolling_summary string
-    that the loop folds into the system prompt. The recent tool history
-    (last 20 calls) is still rendered into the system prompt by
-    ``_render_tool_history`` so the model retains its working context.
+    This ensures we never orphan a tool-call from its result, which would
+    cause a fatal API error on Groq/OpenAI.
     """
-    if not messages:
-        return messages, ""
-    tail_size = max(0, keep_last_k) * 2
-    if len(messages) <= 1 + tail_size:
+    if not messages or len(messages) <= (keep_last_k * 2) + 1:
         return messages, ""
 
+    # 1. Identify where the 'tail' starts. We look back for the K-th turn.
+    # We walk backwards and count assistant messages that aren't tool-results.
+    tail_start_idx = 0
+    turns_found = 0
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "assistant":
+            turns_found += 1
+            if turns_found >= keep_last_k:
+                tail_start_idx = i
+                break
+    
+    # Ensure we don't accidentally start the tail in the middle of a tool sequence.
+    # (Though by looking for the assistant message, we should be at the start).
+    
     head = messages[:1]
-    tail = messages[-tail_size:] if tail_size > 0 else []
-    middle = messages[1: len(messages) - tail_size]
+    middle = messages[1:tail_start_idx]
+    tail = messages[tail_start_idx:]
 
-    preserved_user: list[dict[str, Any]] = []
+    preserved: list[dict[str, Any]] = []
     dropped = 0
     for m in middle:
-        role = m.get("role")
-        # Keep real user messages (interrupts / instructions).
-        if role == "user":
-            preserved_user.append(m)
-        # Keep assistant/tool messages only if they are within the tail.
-        # Everything else in the middle gets dropped/summarized.
-        elif role in ("assistant", "tool"):
-            dropped += 1
+        # Keep real user messages (original instructions / interrupts)
+        # but drop tool results and intermediate assistant thoughts.
+        if m.get("role") == "user" and not _is_tool_result_message(m):
+            preserved.append(m)
         else:
-            # System or unknown; keep it just in case.
-            preserved_user.append(m)
+            dropped += 1
 
     summary = ""
     if dropped:
         summary = (
             "## Context compaction\n"
-            f"- {dropped} older message(s) (turns) collapsed to save tokens. "
-            "Refer to the recent tool history above for details on prior steps."
+            f"- {dropped} older intermediate turns collapsed to save tokens. "
+            "Refer to the Recent Tool History below for the results of those steps."
         )
 
-    return head + preserved_user + tail, summary
+    return head + preserved + tail, summary
