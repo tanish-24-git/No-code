@@ -62,6 +62,27 @@ def _publish_metric_event(job: JobRecord, terminal: bool = False) -> None:
     ))
 
 
+def _publish_anomaly_event(job_id: str, reason: str, snapshot: dict[str, Any]) -> None:
+    """Fired from inside the trainer thread when it detects NaN/Inf loss.
+
+    Faster than waiting for TrainingMonitorAgent's next metric tick — the
+    trainer is stopping anyway, so RecoveryAgent gets the signal sooner.
+    """
+    sid = _job_to_session.get(job_id)
+    if not sid:
+        return
+    payload: dict[str, Any] = {
+        "job_id": job_id,
+        "anomaly": reason,
+        "reason": f"trainer-detected: {reason}",
+        **(snapshot or {}),
+    }
+    get_bus().publish_threadsafe(AgentEvent(
+        session_id=sid, kind="TrainingAnomalyDetected",
+        actor="trainer", payload=payload,
+    ))
+
+
 def _job_log_path(job_id: str) -> Path:
     return settings.data_dir / "jobs" / f"{job_id}.log"
 
@@ -122,6 +143,33 @@ def request_stop(job_id: str) -> bool:
         return False
     flag.set()
     return True
+
+
+def active_jobs_for_session(session_id: str) -> list[str]:
+    """Return job IDs bound to this session that have not yet hit a terminal
+    state (used by the hard-wired stop intent in the agentic loop)."""
+    out: list[str] = []
+    for jid, sid in list(_job_to_session.items()):
+        if sid != session_id:
+            continue
+        if _terminal.get(jid):
+            continue
+        out.append(jid)
+    return out
+
+
+def stop_all_session_jobs(session_id: str) -> list[str]:
+    """Set the stop flag on every non-terminal job bound to this session.
+
+    Used by the agentic loop when a user types a stop keyword. Returns the
+    list of job IDs that were signaled (so the loop can report it back).
+    Idempotent: jobs already terminal or unknown are skipped.
+    """
+    stopped: list[str] = []
+    for jid in active_jobs_for_session(session_id):
+        if request_stop(jid):
+            stopped.append(jid)
+    return stopped
 
 
 # ─── Public API ─────────────────────────────────────────────────────────────
@@ -349,6 +397,10 @@ def _handler_train(job: JobRecord, config: PipelineConfig, node: dict[str, Any],
             f"loss={job.current_loss}")
         _publish_metric_event(job)
 
+    def _on_anomaly(reason: str, snapshot: dict[str, Any]) -> None:
+        log(f"[ANOMALY] {reason} step={snapshot.get('step')} loss={snapshot.get('loss')}")
+        _publish_anomaly_event(job.id, reason, snapshot)
+
     try:
         result = run_training(
             base_model=config.base_model,
@@ -366,6 +418,7 @@ def _handler_train(job: JobRecord, config: PipelineConfig, node: dict[str, Any],
             lora_rank=int(config.lora_rank),
             on_step=_on_step,
             is_stopped=lambda: stop.is_set(),
+            on_anomaly=_on_anomaly,
             # v4.0: efficiency-first kernel
             use_unsloth=getattr(config, "use_unsloth", False),
             optimizer=getattr(config, "optimizer", "adamw") or "adamw",

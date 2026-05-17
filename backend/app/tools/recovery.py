@@ -21,7 +21,11 @@ from app.tools.registry import ToolContext, tool
 
 
 _LEVEL1 = {"network_timeout", "rate_limit", "checkpoint_unavailable"}
-_LEVEL2 = {"loss_nan_or_inf", "loss_no_decrease", "loss_spike", "oom", "vram_exceeded"}
+_LEVEL2 = {
+    "loss_nan_or_inf", "loss_no_decrease", "loss_spike",
+    "oom", "vram_exceeded",
+    "gradient_explosion", "overfitting", "val_train_divergence",
+}
 _LEVEL3 = {"data_corruption", "hardware_failure", "cuda_unavailable"}
 
 
@@ -85,6 +89,70 @@ async def recovery_propose_plan(args: dict[str, Any], _ctx: ToolContext) -> dict
         ]
         rationale = "sudden loss spike — halve batch and double grad-accum to reduce per-step variance"
         confidence = 0.55
+        level = "L2"
+
+    elif anomaly == "gradient_explosion":
+        # Far more aggressive than loss_spike: enable gradient clipping,
+        # cut LR by 10x, halve batch to dampen per-step variance.
+        old_lr = cfg.get("learning_rate") or 2e-4
+        old_bs = cfg.get("batch_size", 4) or 4
+        ops = [
+            {"op": "set", "path": "config.learning_rate",
+             "old": old_lr, "new": max(old_lr * 0.1, 1e-6)},
+            {"op": "set", "path": "config.batch_size",
+             "old": old_bs, "new": max(1, old_bs // 2)},
+            {"op": "set", "path": "config.max_grad_norm",
+             "old": cfg.get("max_grad_norm"), "new": 1.0},
+        ]
+        rationale = (
+            "gradient explosion — cut LR 10x, halve batch, clip gradients "
+            "at norm=1.0"
+        )
+        confidence = 0.75
+        level = "L2"
+
+    elif anomaly == "overfitting":
+        # Eval loss drifting up while train drops: the model is memorising.
+        # Bump LoRA dropout, cap epochs at the current value, drop LR.
+        cur_epoch = cfg.get("epochs", 3) or 3
+        old_lr = cfg.get("learning_rate") or 2e-4
+        ops = [
+            {"op": "set", "path": "config.lora_dropout",
+             "old": cfg.get("lora_dropout"), "new": 0.1},
+            {"op": "set", "path": "config.epochs",
+             "old": cur_epoch, "new": max(1, cur_epoch - 1)},
+            {"op": "set", "path": "config.learning_rate",
+             "old": old_lr, "new": old_lr * 0.5},
+            {"op": "set", "path": "config.early_stopping",
+             "old": cfg.get("early_stopping"), "new": True},
+        ]
+        rationale = (
+            "overfitting (val rising while train falls) — increase LoRA "
+            "dropout to 0.1, shorten training by 1 epoch, halve LR, enable "
+            "early stopping"
+        )
+        confidence = 0.7
+        level = "L2"
+
+    elif anomaly == "val_train_divergence":
+        # Catastrophic-forgetting-style drift: gap widening as the model
+        # specialises away from the base distribution. Lower LR + add
+        # regularisation; do NOT halve epochs (the user wants more domain
+        # specialisation, just gentler).
+        old_lr = cfg.get("learning_rate") or 2e-4
+        ops = [
+            {"op": "set", "path": "config.learning_rate",
+             "old": old_lr, "new": old_lr * 0.3},
+            {"op": "set", "path": "config.lora_dropout",
+             "old": cfg.get("lora_dropout"), "new": 0.08},
+            {"op": "set", "path": "config.weight_decay",
+             "old": cfg.get("weight_decay"), "new": 0.01},
+        ]
+        rationale = (
+            "val/train divergence — drop LR to 30%, add LoRA dropout 0.08, "
+            "add weight decay 0.01 to slow specialisation"
+        )
+        confidence = 0.65
         level = "L2"
 
     elif anomaly in {"oom", "vram_exceeded"}:

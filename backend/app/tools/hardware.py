@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.tools.registry import ToolContext, tool
-from app.utils.hardware import detect_hardware
+from app.utils.hardware import compute_vram_budget, detect_hardware
 
 
 @tool(
@@ -52,6 +52,41 @@ async def hardware_estimate_throughput(args: dict[str, Any], _ctx: ToolContext) 
     if device == "mps":
         return {"tokens_per_sec": round(2000.0 / max(params, 0.5), 1), "device": device, "params_b": params}
     return {"tokens_per_sec": round(150.0 / max(params, 0.5), 1), "device": device, "params_b": params}
+
+
+@tool(
+    name="hardware.vram_budget",
+    description=(
+        "Estimate VRAM required to fine-tune a given model with the given "
+        "hyperparameters, and report whether it fits on the detected GPU. "
+        "Use this BEFORE finalizing a training strategy to avoid CUDA OOM."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "model_id": {"type": "string", "description": "HF repo id (e.g. meta-llama/Llama-3.1-8B)."},
+            "method": {"type": "string", "description": "lora | qlora | dora | full"},
+            "precision": {"type": "string", "description": "bf16 | fp16 | float32"},
+            "quantization": {"type": "string", "description": "none | int4 | int8"},
+            "batch_size": {"type": "integer", "minimum": 1},
+            "max_seq_len": {"type": "integer", "minimum": 64},
+            "gradient_accumulation": {"type": "integer", "minimum": 1, "default": 1},
+            "lora_rank": {"type": "integer", "minimum": 1, "default": 16},
+        },
+        "required": ["model_id", "batch_size", "max_seq_len"],
+    },
+)
+async def hardware_vram_budget(args: dict[str, Any], _ctx: ToolContext) -> dict[str, Any]:
+    return compute_vram_budget(
+        model_id=str(args.get("model_id") or ""),
+        method=str(args.get("method") or "lora"),
+        precision=str(args.get("precision") or "bf16"),
+        quantization=str(args.get("quantization") or "none"),
+        batch_size=int(args.get("batch_size") or 1),
+        max_seq_len=int(args.get("max_seq_len") or 1024),
+        gradient_accumulation=int(args.get("gradient_accumulation") or 1),
+        lora_rank=int(args.get("lora_rank") or 16),
+    )
 
 
 def _detect_ram_gb() -> float | None:

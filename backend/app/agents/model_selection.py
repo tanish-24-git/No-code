@@ -46,10 +46,29 @@ class ModelSelectionAgent(BaseAgent):
         hw = session.artifacts.get("hardware")
         profile = session.artifacts.get("profile") or {}
         task = session.artifacts.get("task_inference")
-        if not hw or not task:
-            return  # Will fire again on the other event.
+        if not hw:
+            # Hardware probe is the genuine blocker; without it we can't
+            # filter by VRAM. Defer — HardwareProfileCompleted will refire.
+            return
         if session.artifacts.get("chosen_model"):
             return  # Already settled.
+
+        # No hardcoded task default. If task_inference hasn't been
+        # written, the upstream TaskInferenceAgent already surfaced its
+        # failure to the UI (rate limit, context limit, missing provider).
+        # We make that visible AGAIN at the model-selection scope so the
+        # user knows which step is blocked, and stop. No synthetic
+        # guesses about what the user intended.
+        if not task:
+            await self.emit_error(
+                session_id,
+                f"[{self.name}] Cannot search for a base model: "
+                "task_inference artifact is missing. The previous "
+                "TaskInferenceAgent step did not complete — see the LLM "
+                "error above (rate limit, context limit, or missing "
+                "API key) and retry by commenting on the dataset.",
+            )
+            return
 
         await self.materialize_node(
             session_id,

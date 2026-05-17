@@ -236,3 +236,120 @@ def pick_model(provider: str, configured_model: str, tier: Tier) -> str:
     if not candidate:
         return configured_model
     return candidate
+
+
+# ── Per-model context window budgets (May 2026) ───────────────────────────
+#
+# Used by AgenticLoop to size its rolling compaction window. A user on
+# Sonnet 4.6 with 200K context can keep many more turns visible than a
+# user on Llama-3.1-8B-instant with 8K context. Numbers err conservative
+# (75% of the advertised window) because real-world effective context is
+# always smaller — system prompts, tool schemas, and provider overhead
+# eat the rest.
+
+_CONTEXT_BUDGETS: dict[str, int] = {
+    # Anthropic — 200K across the Claude 4.x family.
+    "claude-opus":   180000,
+    "claude-sonnet": 180000,
+    "claude-haiku":  180000,
+    # OpenAI — 128K standard, 1M for GPT-5 long-context variant.
+    "gpt-5":         900000,   # the 1M variant
+    "gpt-4o":        110000,
+    "gpt-4.1":       110000,
+    "o1":            100000,
+    "o3":            100000,
+    "o4":            100000,
+    # Gemini — 2M flagship, 1M flash, 1M flash-lite.
+    "gemini-2.5-pro":  1800000,
+    "gemini-2.5-flash":  900000,
+    "gemini-2.0-flash":  900000,
+    "gemini-flash-lite": 900000,
+    "gemini-1.5-pro":  1800000,
+    "gemini-1.5-flash":  900000,
+    # Groq — Llama-3.x 131K standard.
+    "llama-3.3-70b-versatile": 110000,
+    "llama-3.1-70b": 110000,
+    "llama-3.1-8b-instant": 110000,
+    "llama-3.1-8b": 110000,
+    # Mistral
+    "mistral-large": 110000,
+    "mistral-small": 28000,
+    "open-mistral":  28000,
+    "codestral":     28000,
+    # DeepSeek
+    "deepseek-chat": 110000,
+    "deepseek-r1":   55000,
+    # Cohere Command R/R+
+    "command-r-plus": 110000,
+    "command-r":     110000,
+    # Perplexity Sonar
+    "sonar-pro":      100000,
+    "sonar":          110000,
+    "sonar-small":    11000,
+    # Last-resort floor for unknown models (~ 8K, the smallest common limit).
+    "default":       7000,
+}
+
+
+def context_budget(model: str) -> int:
+    """Return the usable context budget (input tokens) for ``model``.
+
+    Substring match against the model id; falls back to the conservative
+    default when nothing matches. Operators can override by adding rows
+    to ``data/model_context_budgets.json`` (auto-seeded on first run).
+    """
+    m = (model or "").lower()
+    table = _load_context_budgets()
+    # Longest-key-first so "gemini-2.5-pro" wins over "gemini-2.0-flash".
+    for key in sorted(table.keys(), key=len, reverse=True):
+        if key == "default":
+            continue
+        if key in m:
+            try:
+                return int(table[key])
+            except (TypeError, ValueError):
+                continue
+    try:
+        return int(table.get("default", _CONTEXT_BUDGETS["default"]))
+    except (TypeError, ValueError):
+        return _CONTEXT_BUDGETS["default"]
+
+
+def _context_budgets_path() -> Path:
+    return settings.data_dir / "model_context_budgets.json"
+
+
+def _load_context_budgets() -> dict[str, int]:
+    path = _context_budgets_path()
+    if not path.exists():
+        try:
+            settings.data_dir.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(_CONTEXT_BUDGETS, indent=2), encoding="utf-8")
+        except Exception:
+            return dict(_CONTEXT_BUDGETS)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            return {k: int(v) for k, v in raw.items() if isinstance(v, (int, float))}
+    except Exception:
+        pass
+    return dict(_CONTEXT_BUDGETS)
+
+
+def recommended_keep_last_k(model: str, *, target_fill: float = 0.6) -> int:
+    """Recommend a rolling-window depth (in logical turns) based on the
+    model's context budget.
+
+    Calibrated so that on average a turn ≈ 2-3K tokens of prompt + tool
+    payload; we keep last K turns plus the first user message, summarise
+    the middle. target_fill defaults to 0.6, mirroring Claude Code's
+    "proactively compact at 60% fill" heuristic.
+    """
+    budget = context_budget(model)
+    avg_turn_tokens = 2500.0
+    headroom = max(1.0, budget * float(target_fill))
+    raw_k = int(headroom // avg_turn_tokens)
+    # Clamp to a sane band: never less than 3 (otherwise tool-call turns
+    # orphan their results); never more than 32 (otherwise compaction
+    # provides no token savings on huge-context models).
+    return max(3, min(32, raw_k))

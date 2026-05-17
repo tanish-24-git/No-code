@@ -39,7 +39,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from app.utils.config import settings
 
@@ -47,21 +47,45 @@ from app.utils.config import settings
 log = logging.getLogger("finetune-studio.agents.rate_limiter")
 
 
-# Default limits committed alongside the example file. The runtime file
-# at `data/provider_limits.json` overrides these and may be edited
-# without touching the code.
+# Default limits — calibrated to PAID-TIER entry baselines per provider's
+# public docs as of May 2026. Paid keys get the throughput they paid for;
+# free-tier users on the same code will hit 429s (which surface to the UI
+# via the classifier in base.py — that's the user's billing problem, not
+# ours). Per-user overrides go in data/provider_limits.json. Users with
+# higher tiers can either bump these manually OR enable response-header
+# auto-tuning (see `_apply_response_headers` below).
+#
+# Numbers are sourced from official docs (Anthropic Tier 2, OpenAI Tier 1,
+# Gemini paid Tier 1, Groq Dev, Mistral Scale, Cohere Production, etc.).
+# Bump _LIMITS_VERSION and rotate values when providers re-tier.
+_LIMITS_VERSION = 2
 _DEFAULT_LIMITS: dict[str, dict[str, float]] = {
-    "gemini":  {"rpm": 5,  "tpm": 250000, "min_interval_sec": 13},
-    "google":  {"rpm": 5,  "tpm": 250000, "min_interval_sec": 13},
-    "vertex":  {"rpm": 5,  "tpm": 250000, "min_interval_sec": 13},
-    "groq":    {"rpm": 30, "tpm": 6000,   "min_interval_sec": 2},
-    "openrouter": {"rpm": 20, "tpm": 200000, "min_interval_sec": 3},
-    "together": {"rpm": 30, "tpm": 500000, "min_interval_sec": 2},
-    "deepseek": {"rpm": 60, "tpm": 200000, "min_interval_sec": 1},
-    "mistral":  {"rpm": 30, "tpm": 200000, "min_interval_sec": 2},
-    "openai":   {"rpm": 60, "tpm": 1000000, "min_interval_sec": 1},
-    "anthropic": {"rpm": 50, "tpm": 400000, "min_interval_sec": 1.2},
-    "default":  {"rpm": 60, "tpm": 1000000, "min_interval_sec": 3},
+    # Anthropic Tier 2 ($40 spent): 1000 RPM, 80K ITPM, 16K OTPM for Sonnet.
+    # Higher tiers (4: 4000 RPM, 2M ITPM Sonnet) need a manual bump.
+    "anthropic": {"rpm": 1000, "tpm": 80000,  "min_interval_sec": 0.06},
+    # OpenAI Tier 1 ($5 spent): 500 RPM, 30K TPM for GPT-4o, 500K TPM GPT-5.
+    "openai":    {"rpm": 500,  "tpm": 500000, "min_interval_sec": 0.12},
+    # Gemini paid Tier 1: 150-300 RPM, 1M TPM, RPD limits much higher.
+    "gemini":    {"rpm": 200,  "tpm": 1000000, "min_interval_sec": 0.3},
+    "google":    {"rpm": 200,  "tpm": 1000000, "min_interval_sec": 0.3},
+    "vertex":    {"rpm": 200,  "tpm": 1000000, "min_interval_sec": 0.3},
+    # Groq Dev tier (paid w/ credit card): ~10x free; 60-120 RPM, 60-120K TPM.
+    "groq":      {"rpm": 100,  "tpm": 100000, "min_interval_sec": 0.6},
+    # Mistral Scale (pay-as-you-go): 300 RPM, 500K TPM.
+    "mistral":   {"rpm": 300,  "tpm": 500000, "min_interval_sec": 0.2},
+    # DeepSeek dynamic; baseline ~300 RPM, 200K TPM. May 429 under load.
+    "deepseek":  {"rpm": 300,  "tpm": 200000, "min_interval_sec": 0.2},
+    # Perplexity Sonar Tier 1 (paid >= $50 cumulative): conservative 60 RPM.
+    "perplexity": {"rpm": 60,  "tpm": 100000, "min_interval_sec": 1.0},
+    # Together AI: response-header driven; conservative model-agnostic baseline.
+    "together":  {"rpm": 60,   "tpm": 500000, "min_interval_sec": 1.0},
+    # Cohere production keys: chat 500 RPM, embed 2000 RPM.
+    "cohere":    {"rpm": 500,  "tpm": 1000000, "min_interval_sec": 0.12},
+    # OpenRouter paid models: NO platform-level limit (upstream applies).
+    # Set high so our gate doesn't add artificial cap; upstream 429s surface.
+    "openrouter": {"rpm": 1000, "tpm": 2000000, "min_interval_sec": 0.06},
+    # Fallback for unknown providers: assume moderate paid tier.
+    "default":   {"rpm": 200,  "tpm": 500000, "min_interval_sec": 0.3},
 }
 
 
@@ -73,22 +97,35 @@ def _example_path() -> Path:
     return settings.data_dir / "provider_limits.example.json"
 
 
+def _seeded_table() -> dict[str, Any]:
+    """Build the on-disk seed: defaults + version tag for migration."""
+    out: dict[str, Any] = {"_version": _LIMITS_VERSION}
+    out.update(_DEFAULT_LIMITS)
+    return out
+
+
 def _load_limits() -> dict[str, dict[str, float]]:
     """Read the runtime limits file. Auto-seed on first run.
 
     Returns the in-memory limit table. The lookup is substring-based
     against the lowercased provider name (so "google-gemini",
     "vertex-ai-gemini" and bare "gemini" all map to the gemini row).
+
+    Migration: when the on-disk file predates the current
+    _LIMITS_VERSION, we write the new defaults to
+    `provider_limits.example.json` so the user can diff/merge, but
+    NEVER overwrite their `provider_limits.json` — they may have
+    custom enterprise-tier values we shouldn't clobber.
     """
     path = _limits_path()
     if not path.exists():
         try:
             settings.data_dir.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(_DEFAULT_LIMITS, indent=2),
+            path.write_text(json.dumps(_seeded_table(), indent=2),
                             encoding="utf-8")
-            _example_path().write_text(json.dumps(_DEFAULT_LIMITS, indent=2),
+            _example_path().write_text(json.dumps(_seeded_table(), indent=2),
                                        encoding="utf-8")
-            log.info("seeded provider limits at %s", path)
+            log.info("seeded provider limits at %s (v%d)", path, _LIMITS_VERSION)
         except Exception as e:
             log.warning("could not seed provider limits file (%s); using in-memory defaults", e)
             return dict(_DEFAULT_LIMITS)
@@ -96,6 +133,26 @@ def _load_limits() -> dict[str, dict[str, float]]:
         raw = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             raise ValueError("provider_limits.json must be a dict")
+        loaded_version = int(raw.get("_version", 1))
+        if loaded_version < _LIMITS_VERSION:
+            # Rewrite the example so the user can see what's new without
+            # losing their custom row(s).
+            try:
+                _example_path().write_text(
+                    json.dumps(_seeded_table(), indent=2),
+                    encoding="utf-8",
+                )
+                log.info(
+                    "provider_limits.json is v%d (current is v%d); "
+                    "wrote new defaults to %s — diff and merge if you "
+                    "want the latest paid-tier baselines.",
+                    loaded_version, _LIMITS_VERSION, _example_path(),
+                )
+            except Exception:
+                pass
+        # Strip the version tag so downstream lookups don't try to match
+        # "_version" as a provider name.
+        raw.pop("_version", None)
         return raw
     except Exception as e:
         log.warning("could not read provider limits (%s); using defaults", e)

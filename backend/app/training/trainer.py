@@ -34,6 +34,7 @@ silently produces a stub.
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -227,6 +228,7 @@ def run_training(
     lora_dropout: float = 0.05,
     on_step: Optional[Callable[[dict[str, Any]], None]] = None,
     is_stopped: Optional[Callable[[], bool]] = None,
+    on_anomaly: Optional[Callable[[str, dict[str, Any]], None]] = None,
     # v4.0: efficiency knobs
     use_unsloth: bool = False,
     optimizer: str = "adamw",
@@ -428,19 +430,75 @@ def run_training(
         optim_str = "adamw_bnb_8bit"
 
     class _StreamCallback(TrainerCallback):  # type: ignore[misc]
+        _anomaly_fired = False
+
+        def _check_stop(self_, control):
+            if is_stopped is not None:
+                try:
+                    if is_stopped():
+                        control.should_training_stop = True
+                except Exception:
+                    pass
+            return control
+
+        def _check_anomaly(self_, state, control):
+            # Inspect the most recent loss; if non-finite, abort fast and
+            # notify the anomaly callback exactly once per run.
+            if self_._anomaly_fired:
+                return
+            history = getattr(state, "log_history", None) or []
+            if not history:
+                return
+            recent = history[-1]
+            loss_val = recent.get("loss", recent.get("train_loss"))
+            if loss_val is None:
+                return
+            try:
+                lv = float(loss_val)
+            except (TypeError, ValueError):
+                return
+            if math.isnan(lv) or math.isinf(lv):
+                log.warning("non-finite training loss (%s) — aborting for revamp", lv)
+                control.should_training_stop = True
+                self_._anomaly_fired = True
+                if on_anomaly is not None:
+                    try:
+                        on_anomaly("loss_nan_or_inf", {
+                            "step": int(getattr(state, "global_step", 0)),
+                            "epoch": float(getattr(state, "epoch", 0.0) or 0.0),
+                            "loss": lv,
+                        })
+                    except Exception:
+                        log.exception("on_anomaly callback failed")
+
+        def on_train_begin(self_, args, state, control, **kwargs):
+            return self_._check_stop(control)
+
+        def on_epoch_begin(self_, args, state, control, **kwargs):
+            return self_._check_stop(control)
+
+        def on_step_begin(self_, args, state, control, **kwargs):
+            return self_._check_stop(control)
+
         def on_log(self_, args, state, control, logs=None, **kwargs):
             if logs and on_step is not None:
+                raw_loss = logs.get("loss", logs.get("train_loss", 0.0))
+                try:
+                    loss_val = float(raw_loss) if raw_loss is not None else 0.0
+                except (TypeError, ValueError):
+                    loss_val = 0.0
                 on_step({
                     "step": int(state.global_step),
                     "epoch": float(state.epoch or 0.0),
-                    "loss": float(logs.get("loss", logs.get("train_loss", 0.0)) or 0.0),
+                    "loss": loss_val,
                     "learning_rate": float(logs.get("learning_rate", learning_rate)),
                 })
+            self_._check_anomaly(state, control)
+            return self_._check_stop(control)
 
         def on_step_end(self_, args, state, control, **kwargs):
-            if is_stopped is not None and is_stopped():
-                control.should_training_stop = True
-            return control
+            self_._check_anomaly(state, control)
+            return self_._check_stop(control)
 
     if SFTTrainer is not None and SFTConfig is not None:
         sft_cfg = SFTConfig(

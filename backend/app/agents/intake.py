@@ -16,7 +16,13 @@ class DatasetIntakeAgent(BaseAgent):
     name = "DatasetIntakeAgent"
     role = "First-pass dataset inspection"
     directive_scope = "data"
-    allowed_tools = ("dataset.inspect", "dataset.read_sample", "dataset.summarize_fields", "audit.write")
+    allowed_tools = (
+        "dataset.inspect",
+        "dataset.read_sample",
+        "dataset.summarize_fields",
+        "web_search",  # look up dataset-domain context for unfamiliar uploads (#8)
+        "audit.write",
+    )
     triggers = ("DatasetUploaded",)
     tier_preference = "fast"  # first-pass narration of fields + sample rows
 

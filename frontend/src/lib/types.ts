@@ -31,6 +31,7 @@ export type Settings = {
   llm_base_url: string;
   llm_api_key_masked: string | null;
   llm_api_key_set: boolean;
+  llm_api_keys_count: number;
   llm_source: 'env' | 'ui' | 'unset';
   hf_token_masked: string | null;
   hf_token_set: boolean;

@@ -557,6 +557,12 @@ class BaseAgent:
             api_key = settings.llm_api_key or ""
 
         if not provider or not model:
+            await self.emit_error(
+                session_id,
+                "LLM call aborted: no provider/model configured. "
+                "Open Settings and set LLM_PROVIDER + LLM_MODEL + API key, "
+                "then retry.",
+            )
             return ""
 
         # Tier routing: optionally swap to a cheaper same-provider model
@@ -604,6 +610,13 @@ class BaseAgent:
             log.warning("call_llm failed: %s", e)
             if stream_thoughts:
                 await self.think_delta(session_id, "", is_final=True, parent=parent)
+            # Always surface LLM failures to the UI. The full provider
+            # message is preserved verbatim — context-length errors,
+            # 429s, invalid keys, and network blips all read clearly.
+            await self.emit_error(
+                session_id,
+                _classify_llm_error(e, provider=provider, model=model),
+            )
             return full_text
 
         if stream_thoughts:
@@ -629,11 +642,36 @@ class BaseAgent:
         Returns None if no provider is configured OR all retries fail.
         Callers decide whether to fall back to a deterministic computation.
         """
-        attempt_prompt = (
-            prompt
-            + "\n\nReturn ONLY a single JSON object inside a ```json ... ``` "
-            "fence. No extra prose."
+        # Inject the actual JSON schema so the LLM doesn't have to guess
+        # field names or enum casing. This is the single most effective
+        # defence against cascading validation failures in StrategyChoice,
+        # GraphProposal, RecoveryPlan, etc. — without it the model mirrors
+        # whatever casing the prompt uses (e.g. "QLoRA"), which Pydantic
+        # Literal validators reject case-sensitively.
+        schema_block = _format_schema_for_prompt(schema)
+        strict_footer = (
+            "\n\n=== RESPONSE SCHEMA ===\n"
+            + schema_block
+            + "\n=== END SCHEMA ===\n\n"
+            "OUTPUT FORMAT — read carefully:\n"
+            "1. Your reply MUST start with the marker `<<<JSON>>>` and end "
+            "with `<<<END>>>`.\n"
+            "2. Between those markers, emit EXACTLY ONE fenced "
+            "```json ... ``` block. Nothing else.\n"
+            "3. Do NOT write explanations, preambles, 'let me think', "
+            "'here is the JSON', commentary, or analysis outside the "
+            "fence. Anything outside the markers is discarded.\n"
+            "4. Enum / Literal values are CASE-SENSITIVE — use the exact "
+            "lowercase strings shown in the schema above.\n"
+            "5. If you are streaming thoughts, finish them BEFORE the "
+            "`<<<JSON>>>` marker — never interleave thinking with JSON.\n"
+            "6. The JSON object must be complete and balanced; do not "
+            "truncate it. If it would exceed your output budget, shorten "
+            "string fields (especially 'rationale') rather than omit "
+            "closing braces."
         )
+        attempt_prompt = prompt + strict_footer
+        last_parse_error: Optional[str] = None
         for i in range(max_retries + 1):
             raw = await self.call_llm(
                 session_id, attempt_prompt,
@@ -644,20 +682,187 @@ class BaseAgent:
                 tier=tier,
             )
             if not raw:
+                # call_llm already emitted a UI-visible error (no provider
+                # configured, stream exception). Caller decides next steps.
                 return None
             try:
                 return parse_llm_json(raw, schema)
             except LLMSchemaError as e:
+                last_parse_error = str(e)
                 if i == max_retries:
                     log.info("call_llm_typed gave up parsing %s after %d tries: %s",
                              schema.__name__, max_retries + 1, e)
+                    # Surface the schema failure to the UI so the user
+                    # sees WHY the agent stalled (which field was wrong,
+                    # which enum value mismatched, etc.).
+                    snippet = (raw or "").strip()
+                    if len(snippet) > 400:
+                        snippet = snippet[:400] + "..."
+                    await self.emit_error(
+                        session_id,
+                        f"[{self.name}] LLM returned an invalid "
+                        f"{schema.__name__} JSON after {max_retries + 1} "
+                        f"attempt(s). Parse error: {last_parse_error}. "
+                        f"This usually means the model is hitting its "
+                        f"context limit, has weak JSON-mode support, or "
+                        f"misread the schema. First 400 chars of the "
+                        f"final reply: {snippet}",
+                    )
                     return None
                 attempt_prompt = (
                     prompt
-                    + f"\n\nYour previous reply was not valid {schema.__name__} JSON: "
-                    f"{e}. Try again and return ONLY a fenced JSON object."
+                    + strict_footer
+                    + f"\n\nRETRY: your previous reply was not valid "
+                    f"{schema.__name__} JSON: {e}. Common causes: emitted "
+                    "prose before/after the fence, truncated mid-object "
+                    "(ran out of output tokens), or used uppercase enum "
+                    "values. Fix and re-emit ONLY the fenced JSON inside "
+                    "<<<JSON>>> / <<<END>>> markers."
                 )
         return None
+
+
+def _classify_llm_error(e: Exception, *, provider: str = "", model: str = "") -> str:
+    """Translate a provider exception into a user-readable chat message.
+
+    Pattern-matches the most common signals from the OpenAI, Anthropic,
+    and Gemini SDKs (status codes embedded in the str, error type
+    names, key substrings). Falls back to the raw exception message
+    so the user always sees the underlying cause — never a generic
+    "AI failed" placeholder.
+    """
+    msg = str(e)
+    low = msg.lower()
+    tag = f"[{provider}/{model}] " if provider else ""
+
+    # Rate-limit / quota
+    if any(s in low for s in (
+        "rate limit", "rate_limit", "ratelimit", "429",
+        "tokens per minute", "tokens-per-minute", "tpm",
+        "requests per minute", "rpm", "quota", "exceeded",
+        "resource_exhausted", "throttle",
+    )):
+        return (
+            f"{tag}Provider rate limit hit: {msg}. Wait ~60s and try again, "
+            f"add more keys in Settings → 'multiple-key rotation', or "
+            f"upgrade your tier."
+        )
+
+    # Context-length / token-budget
+    if any(s in low for s in (
+        "context length", "context_length", "context window",
+        "maximum context", "max_tokens", "too long",
+        "prompt is too long", "context limit",
+    )):
+        return (
+            f"{tag}Context window exceeded: {msg}. The conversation has "
+            f"grown past this model's max input. Start a fresh session, "
+            f"or switch to a larger-context model in Settings."
+        )
+
+    # Auth / key
+    if any(s in low for s in (
+        "401", "403", "unauthorized", "forbidden",
+        "invalid api key", "invalid_api_key", "authentication",
+        "permission denied", "api key not valid",
+    )):
+        return (
+            f"{tag}Authentication failed: {msg}. Check the API key in "
+            f"Settings — it may be invalid, revoked, or missing the "
+            f"permission scope the model requires."
+        )
+
+    # Model not found / unsupported
+    if any(s in low for s in (
+        "model not found", "model_not_found", "unknown model",
+        "does not exist", "not supported",
+    )):
+        return (
+            f"{tag}Model unavailable: {msg}. Verify the model id in "
+            f"Settings — typos and deprecated ids are the usual cause."
+        )
+
+    # Network / connectivity
+    if any(s in low for s in (
+        "connection", "timeout", "timed out", "dns",
+        "name resolution", "unreachable", "refused",
+    )):
+        return (
+            f"{tag}Network error reaching the provider: {msg}. Check "
+            f"your internet connection or the provider's status page."
+        )
+
+    # Server / 5xx
+    if any(s in low for s in ("500", "502", "503", "504", "internal server", "service unavailable")):
+        return (
+            f"{tag}Provider server error: {msg}. The provider is having "
+            f"trouble; retry in a minute."
+        )
+
+    # Default — show the raw exception so the user still sees the cause.
+    return f"{tag}LLM call failed: {msg}"
+
+
+def _format_schema_for_prompt(schema: Type[BaseModel]) -> str:
+    """Render a compact prompt-ready view of a pydantic schema.
+
+    We do not dump the full JSON Schema (it can be 100+ lines for nested
+    models and burns prompt budget for little gain). Instead we extract
+    just the surface every Literal/enum LLM mistake hits: field name,
+    type hint, default, and the exact list of valid enum values.
+    """
+    try:
+        full = schema.model_json_schema()
+    except Exception:
+        return f"(could not introspect {schema.__name__})"
+
+    lines: list[str] = []
+    defs = full.get("$defs") or full.get("definitions") or {}
+
+    def _resolve(ref: str) -> dict[str, Any]:
+        key = ref.rsplit("/", 1)[-1]
+        return defs.get(key) or {}
+
+    def _describe_type(field_schema: dict[str, Any]) -> str:
+        if "enum" in field_schema:
+            vals = field_schema["enum"]
+            return "enum: " + " | ".join(repr(v) for v in vals)
+        if "const" in field_schema:
+            return f"const {field_schema['const']!r}"
+        if "anyOf" in field_schema:
+            return " or ".join(_describe_type(v) for v in field_schema["anyOf"])
+        if "$ref" in field_schema:
+            ref_schema = _resolve(field_schema["$ref"])
+            if "enum" in ref_schema:
+                return "enum: " + " | ".join(repr(v) for v in ref_schema["enum"])
+            return ref_schema.get("title", "object")
+        t = field_schema.get("type")
+        if t == "array":
+            items = field_schema.get("items") or {}
+            return f"array<{_describe_type(items)}>"
+        if t == "object":
+            return "object"
+        if isinstance(t, list):
+            return " or ".join(t)
+        return t or "any"
+
+    props = full.get("properties") or {}
+    required = set(full.get("required") or [])
+    for name, spec in props.items():
+        req = " (required)" if name in required else ""
+        default = spec.get("default", "<no default>")
+        type_desc = _describe_type(spec)
+        desc = spec.get("description") or ""
+        line = f"- {name}: {type_desc}{req}, default={default!r}"
+        if desc:
+            line += f"  // {desc[:80]}"
+        lines.append(line)
+
+    # Cap at a sane budget so deeply-nested models don't blow context.
+    body = "\n".join(lines[:60])
+    if len(lines) > 60:
+        body += f"\n... ({len(lines) - 60} more fields elided)"
+    return f"Schema: {schema.__name__}\n{body}"
 
 
 def _normalize_md(text: str) -> str:

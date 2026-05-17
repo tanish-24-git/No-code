@@ -30,6 +30,16 @@ COPY app ./app
 # Runtime data directories. They are mounted as volumes in docker-compose.
 RUN mkdir -p /app/data /app/uploads /app/models
 
+# Non-root runtime user. We create the user AFTER the COPY/mkdir so the
+# image build can run as root for package installs but the actual API
+# server drops privileges. Volume permissions: chown the mount points to
+# our uid so the writable directories survive a docker-compose down -v.
+RUN groupadd --system --gid 1001 finetune \
+    && useradd --system --uid 1001 --gid 1001 --no-create-home --home-dir /app finetune \
+    && chown -R finetune:finetune /app
+
+USER finetune
+
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \

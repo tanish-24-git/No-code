@@ -54,9 +54,13 @@ class TrainingMonitorAgent(BaseAgent):
         metrics = metrics_resp.get("metrics") or []
 
         # Deterministic anomaly check (cheap, runs every event).
+        # Passing job_id enables the log-buffer scan for OOM / data
+        # corruption / CUDA-unavailable errors that wouldn't show up in
+        # the metric stream because training crashed before the next
+        # on_log callback could fire.
         anomaly = await self.call_tool(
             "metrics.detect_anomaly",
-            {"metrics": metrics, "window": 5},
+            {"metrics": metrics, "window": 5, "job_id": job_id},
             session_id,
         )
 

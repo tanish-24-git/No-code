@@ -23,6 +23,7 @@ from app.api.routes import (
     datasets,
     health,
     jobs,
+    memory,
     models,
     pipelines,
     sessions,
@@ -101,6 +102,7 @@ app.include_router(models.router)
 app.include_router(agent.router)
 app.include_router(sessions.router)
 app.include_router(sessions.tools_router)
+app.include_router(memory.router)
 
 
 @app.get("/")
