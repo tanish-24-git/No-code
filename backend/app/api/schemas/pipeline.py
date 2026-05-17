@@ -30,7 +30,13 @@ class PipelineConfig(BaseModel):
 
     training_mode: Literal["fast", "balanced", "high_quality"] = "balanced"
     training_method: Literal["lora", "qlora", "full"] = "lora"
-    base_model: str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    # base_model has NO hardcoded default. The ModelSelectionAgent must
+    # populate it from a live HuggingFace Hub search before the trainer
+    # ever sees this config. An empty string here is a real bug; the
+    # PipelineBuilderAgent already refuses to start training without
+    # chosen_model.repo_id, and we want any other path that bypasses
+    # that gate to crash loud rather than silently train TinyLlama.
+    base_model: str = ""
 
     epochs: int = Field(3, ge=1, le=100)
     batch_size: int = Field(4, ge=1, le=128)
