@@ -16,3 +16,4 @@ import './hardware-probe';
 import './web';
 import './watch-training';
 import './register-model';
+import './hf-upload';
