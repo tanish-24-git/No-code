@@ -9,11 +9,13 @@
  */
 import { useEffect, useState } from 'react';
 import useSWR from 'swr';
-import { api, fetcher } from '@/lib/api';
+import { api, fetcher, uploadFile } from '@/lib/api';
 import { STATUS_TONE, type SessionListItem } from '@/lib/events';
 import { AgentActivity } from '@/components/AgentActivity';
 import { cn } from '@/lib/cn';
-import { Bot, Database, Plus, XCircle } from 'lucide-react';
+import { Bot, Database, Loader2, Plus, Upload, XCircle } from 'lucide-react';
+
+const ACCEPTED_DATASET_TYPES = '.csv,.tsv,.json,.jsonl,.txt,.md,.pdf,.docx,.html,.parquet,.xml,.yaml,.yml,.zip';
 
 export default function PlaygroundPage() {
   const { data, mutate: mutateSessions } = useSWR<{ sessions: SessionListItem[] }>(
@@ -36,14 +38,27 @@ export default function PlaygroundPage() {
     }
   }, [sessions, activeSessionId]);
 
-  const createSession = async () => {
+  const createSession = async (): Promise<string> => {
     setCreating(true);
     try {
       const s = await api<SessionListItem>('/api/sessions', { method: 'POST', body: JSON.stringify({}) });
       await mutateSessions();
       setActiveSessionId(s.id);
+      return s.id;
     } finally {
       setCreating(false);
+    }
+  };
+
+  const [uploading, setUploading] = useState(false);
+  const handleFile = async (file: File) => {
+    setUploading(true);
+    try {
+      const sid = activeSessionId ?? (await createSession());
+      await uploadFile(`/api/sessions/${sid}/upload`, file);
+      mutateSessions();
+    } finally {
+      setUploading(false);
     }
   };
 
@@ -58,19 +73,45 @@ export default function PlaygroundPage() {
     <div className="h-[calc(100vh-112px)] bg-black flex overflow-hidden">
       {/* ── Left rail ─────────────────────────────────────────────────── */}
       <aside className="w-[280px] border-r border-white/5 flex flex-col bg-[#050505]">
-        <div className="p-4 border-b border-white/5">
-          <button
-            onClick={createSession}
-            disabled={creating}
-            className="w-full rounded-lg border-2 border-dashed border-white/15 hover:border-white/40 hover:bg-white/[0.03] transition-all px-4 py-6 text-center space-y-2 disabled:opacity-60"
+        <div className="p-4 border-b border-white/5 space-y-2">
+          <label
+            className={cn(
+              'block w-full cursor-pointer rounded-lg border-2 border-dashed transition-all',
+              uploading
+                ? 'border-white/10 bg-white/[0.02] opacity-60 cursor-wait'
+                : 'border-white/15 hover:border-white/40 hover:bg-white/[0.03]',
+            )}
           >
-            <Plus className="w-5 h-5 text-white/60 mx-auto" />
-            <p className="text-[10px] uppercase tracking-[0.25em] font-black text-white/60">
-              {creating ? 'Creating…' : 'New session'}
-            </p>
-            <p className="text-[9px] uppercase tracking-widest text-white/30 font-medium">
-              then drop a dataset or just talk
-            </p>
+            <input
+              type="file"
+              accept={ACCEPTED_DATASET_TYPES}
+              className="hidden"
+              disabled={uploading}
+              onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
+            />
+            <div className="px-4 py-6 text-center space-y-2">
+              {uploading ? (
+                <Loader2 className="w-5 h-5 text-white/60 mx-auto animate-spin" />
+              ) : (
+                <Upload className="w-5 h-5 text-white/60 mx-auto" />
+              )}
+              <p className="text-[10px] uppercase tracking-[0.25em] font-black text-white/60">
+                {uploading ? 'Uploading…' : 'Drop dataset to start'}
+              </p>
+              <p className="text-[9px] uppercase tracking-widest text-white/30 font-medium">
+                csv json jsonl txt md pdf docx html …
+              </p>
+            </div>
+          </label>
+          <button
+            onClick={() => void createSession()}
+            disabled={creating}
+            className="w-full rounded-md border border-white/10 hover:border-white/30 hover:bg-white/[0.03] transition-all px-3 py-2 flex items-center justify-center gap-2 disabled:opacity-60"
+          >
+            <Plus className="w-3.5 h-3.5 text-white/50" />
+            <span className="text-[9px] uppercase tracking-[0.25em] font-black text-white/50">
+              {creating ? 'Creating…' : 'Empty session'}
+            </span>
           </button>
         </div>
 

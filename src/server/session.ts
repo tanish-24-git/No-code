@@ -71,6 +71,8 @@ export interface SessionRecord {
   watcher: WatcherState | null;
   /** Dynamically-created agent definitions (M4), persisted for resume. */
   ephemeralAgents: Record<string, unknown>[];
+  /** "Approve & allow similar" prefixes (every-command mode). */
+  commandAllowPrefixes: string[];
 }
 
 const SAFE_ID = /^[0-9A-HJKMNP-TV-Z]{26}$/; // ulid alphabet — also the path-traversal guard
@@ -117,6 +119,7 @@ export class SessionStore {
       pendingQuestion: null,
       watcher: null,
       ephemeralAgents: [],
+      commandAllowPrefixes: [],
     };
     mkdirSync(path.join(this.sessionDir(id), 'history'), { recursive: true });
     this.save(record);

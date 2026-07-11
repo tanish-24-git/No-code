@@ -1,12 +1,16 @@
-import { streamText, type ModelMessage } from 'ai';
+import { streamText, type ModelMessage, type AssistantModelMessage, type ToolModelMessage } from 'ai';
 import type { AppConfig } from '../config';
 import type { EventBus } from '../bus';
 import type { SessionStore } from '../session';
+import type { SessionManager } from '../runtime';
+import { capOutput } from '../exec/terminal';
 import { renderMemory } from './memory';
 import { classifyLlmError, createChatModel, type RawUsage } from './provider';
 import { costOfUsage, estimateUsage, spentUsd } from './budget';
 import type { SteeringQueue } from './steering';
 import type { AgentDefinition, LoopResult } from './types';
+import { buildToolSet, executeToolCall, isParallelSafe, type ToolCtx, type ToolOutcome } from './tools/index';
+import './tools/all'; // registers all tools (side effect)
 
 /**
  * The agentic loop — the heart of the harness.
@@ -26,10 +30,18 @@ export interface AgentRunArgs {
   cfg: AppConfig;
   bus: EventBus;
   store: SessionStore;
+  manager: SessionManager;
+  workspaceDir: string;
   steering: SteeringQueue;
   abort: AbortSignal;
   /** Orchestrator = 0; spawned workers = parent + 1 (spawn depth cap lives in spawn_agent). */
   depth: number;
+}
+
+interface PendingToolCall {
+  toolCallId: string;
+  toolName: string;
+  input: unknown;
 }
 
 export async function runAgentLoop(run: AgentRunArgs): Promise<LoopResult> {
@@ -66,14 +78,15 @@ export async function runAgentLoop(run: AgentRunArgs): Promise<LoopResult> {
 
     turns++;
     let text = '';
+    const toolCalls: PendingToolCall[] = [];
     try {
       const result = streamText({
         model,
         system,
         messages,
+        tools: buildToolSet(definition.tools),
         maxOutputTokens: cfg.llm.maxOutputTokens,
         abortSignal: abort,
-        // M2+: tools (declared without execute; we run them ourselves)
       });
       for await (const part of result.fullStream) {
         switch (part.type) {
@@ -83,6 +96,9 @@ export async function runAgentLoop(run: AgentRunArgs): Promise<LoopResult> {
             break;
           case 'reasoning-delta':
             bus.emit(sessionId, 'chat.delta', { channel: 'thinking', delta: part.text }, agentRunId);
+            break;
+          case 'tool-call':
+            toolCalls.push({ toolCallId: part.toolCallId, toolName: part.toolName, input: part.input });
             break;
           case 'error':
             throw part.error instanceof Error ? part.error : new Error(String(part.error));
@@ -99,19 +115,100 @@ export async function runAgentLoop(run: AgentRunArgs): Promise<LoopResult> {
     // 4. Post-flight accounting (M3 adds the pre-flight projection gate).
     recordUsage(run, rawUsage, system, messages, text);
 
+    if (toolCalls.length === 0) {
+      if (text.trim()) {
+        messages.push({ role: 'assistant', content: text });
+        bus.emit(sessionId, 'chat.message', { role: 'assistant', text }, agentRunId);
+        lastText = text;
+      }
+      store.saveHistory(sessionId, agentRunId, messages);
+      // 5. No tool calls: done — unless the user interjected while we streamed.
+      if (steering.size > 0) continue;
+      return { subtype: 'success', finalText: lastText };
+    }
+
+    // 5'. Tool turn: record the assistant message (text narration + calls)…
+    const assistantMsg: AssistantModelMessage = {
+      role: 'assistant',
+      content: [
+        ...(text.trim() ? ([{ type: 'text' as const, text }] as const) : []),
+        ...toolCalls.map((tc) => ({
+          type: 'tool-call' as const,
+          toolCallId: tc.toolCallId,
+          toolName: tc.toolName,
+          input: tc.input,
+        })),
+      ],
+    };
+    messages.push(assistantMsg);
     if (text.trim()) {
-      messages.push({ role: 'assistant', content: text });
       bus.emit(sessionId, 'chat.message', { role: 'assistant', text }, agentRunId);
       lastText = text;
     }
+
+    // …then execute. All-parallel-safe turns fan out (this is how the
+    // orchestrator runs analyst ∥ profiler concurrently).
+    const outcomes = await executeToolCalls(run, toolCalls);
+
+    const toolMsg: ToolModelMessage = {
+      role: 'tool',
+      content: toolCalls.map((tc, i) => ({
+        type: 'tool-result' as const,
+        toolCallId: tc.toolCallId,
+        toolName: tc.toolName,
+        output: outcomes[i].isError
+          ? ({ type: 'error-text' as const, value: capOutput(outcomes[i].text) })
+          : ({ type: 'text' as const, value: capOutput(outcomes[i].text) }),
+      })),
+    };
+    messages.push(toolMsg);
     store.saveHistory(sessionId, agentRunId, messages);
 
-    // M2: execute tool calls here; loop again when the turn used tools.
-
-    // 5. No tool calls: done — unless the user interjected while we streamed.
-    if (steering.size > 0) continue;
-    return { subtype: 'success', finalText: lastText };
+    if (abort.aborted) return { subtype: 'canceled', finalText: lastText };
   }
+}
+
+async function executeToolCalls(run: AgentRunArgs, toolCalls: PendingToolCall[]): Promise<ToolOutcome[]> {
+  const { sessionId, agentRunId, bus } = run;
+  const ctx: ToolCtx = {
+    sessionId,
+    agentRunId,
+    cfg: run.cfg,
+    bus: run.bus,
+    store: run.store,
+    manager: run.manager,
+    workspaceDir: run.workspaceDir,
+    abort: run.abort,
+    depth: run.depth,
+  };
+
+  const runOne = async (tc: PendingToolCall): Promise<ToolOutcome> => {
+    bus.emit(
+      sessionId,
+      'tool.called',
+      { toolCallId: tc.toolCallId, tool: tc.toolName, argsPreview: JSON.stringify(tc.input ?? {}).slice(0, 200) },
+      agentRunId,
+    );
+    const outcome = run.abort.aborted
+      ? { text: 'canceled', isError: true }
+      : await executeToolCall(tc.toolName, tc.input, ctx);
+    bus.emit(
+      sessionId,
+      'tool.result',
+      { toolCallId: tc.toolCallId, ok: !outcome.isError, resultPreview: outcome.text.slice(0, 200) },
+      agentRunId,
+    );
+    return outcome;
+  };
+
+  if (toolCalls.length > 1 && toolCalls.every((tc) => isParallelSafe(tc.toolName))) {
+    return Promise.all(toolCalls.map(runOne));
+  }
+  const outcomes: ToolOutcome[] = [];
+  for (const tc of toolCalls) {
+    outcomes.push(await runOne(tc));
+  }
+  return outcomes;
 }
 
 function resolveModel(cfg: AppConfig, definition: AgentDefinition): string {

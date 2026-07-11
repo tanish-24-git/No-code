@@ -2,67 +2,116 @@
  * Dev-only OpenAI-compatible mock endpoint for harness testing without a real
  * key. Enabled ONLY when FT_ENABLE_MOCK_LLM=1. Point the harness at it with:
  *   LLM_BASE_URL=http://localhost:3000/api/dev/mock-llm/v1
- * Streams a canned completion (with usage on the final chunk), echoing the
- * last user message so tests can assert round-tripping.
+ *
+ * Behaviors (scripted, for E2E tests):
+ *  - last message is a tool result        -> streams "TOOL-RESULT-ACK: <preview>"
+ *  - user text is `use tool <name> <json>`-> streams a tool_calls turn for it
+ *  - otherwise                            -> streams "MOCK-REPLY to: ..." echo
+ * Always ends with a usage chunk (include_usage contract).
  */
 export const dynamic = 'force-dynamic';
+
+interface OaiMessage {
+  role: string;
+  content: unknown;
+  tool_call_id?: string;
+}
+
+function textOf(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) return content.map((p) => (p as { text?: string }).text ?? '').join(' ');
+  return '';
+}
 
 export async function POST(req: Request) {
   if (process.env.FT_ENABLE_MOCK_LLM !== '1') {
     return Response.json({ error: 'mock disabled' }, { status: 404 });
   }
   const body = (await req.json().catch(() => ({}))) as {
-    messages?: { role: string; content: unknown }[];
+    messages?: OaiMessage[];
     stream?: boolean;
     stream_options?: unknown;
     reasoning_effort?: string;
   };
-  const lastUser = [...(body.messages ?? [])].reverse().find((m) => m.role === 'user');
-  const userText =
-    typeof lastUser?.content === 'string'
-      ? lastUser.content
-      : ((lastUser?.content as { text?: string }[] | undefined) ?? []).map((p) => p.text ?? '').join(' ');
-  const reply = `MOCK-REPLY to: "${String(userText).slice(0, 80)}" (stream_options=${JSON.stringify(
-    body.stream_options ?? null,
-  )}, reasoning_effort=${body.reasoning_effort ?? 'none'})`;
-  const words = reply.split(' ');
+  const messages = body.messages ?? [];
+  const last = messages[messages.length - 1];
+  const lastUser = [...messages].reverse().find((m) => m.role === 'user');
+  const userText = textOf(lastUser?.content).replace(/^\[user interjection\]\s*/, '');
+
+  // Scripted tool call: `use tool <name> <json-args>`
+  const toolMatch = last?.role !== 'tool' ? /^use tool (\w+)\s+(\{[\s\S]*\})\s*$/m.exec(userText) : null;
+
+  const encoder = new TextEncoder();
+  const chunks: unknown[] = [];
+  const push = (delta: Record<string, unknown>, finish: string | null = null) =>
+    chunks.push({
+      id: 'mock-1',
+      object: 'chat.completion.chunk',
+      model: 'mock-model',
+      choices: [{ index: 0, delta, finish_reason: finish }],
+    });
+
+  // Real providers guarantee syntactically valid JSON in function.arguments —
+  // normalize through parse+stringify (tolerating raw newlines from test input).
+  let toolArgs: string | null = null;
+  if (toolMatch) {
+    try {
+      toolArgs = JSON.stringify(JSON.parse(toolMatch[2].replace(/\r?\n/g, '\\n')));
+    } catch {
+      toolArgs = null;
+    }
+  }
+
+  if (toolMatch && toolArgs) {
+    const name = toolMatch[1];
+    push({ role: 'assistant', content: `Calling ${name} as instructed. ` });
+    push({
+      tool_calls: [{ index: 0, id: `call_${Date.now()}`, type: 'function', function: { name, arguments: '' } }],
+    });
+    // stream the arguments in two pieces like real providers do
+    const mid = Math.floor(toolArgs.length / 2);
+    push({ tool_calls: [{ index: 0, function: { arguments: toolArgs.slice(0, mid) } }] });
+    push({ tool_calls: [{ index: 0, function: { arguments: toolArgs.slice(mid) } }] });
+    push({}, 'tool_calls');
+  } else {
+    const reply =
+      last?.role === 'tool'
+        ? `TOOL-RESULT-ACK: ${textOf(last.content).slice(0, 160).replace(/\s+/g, ' ')}`
+        : `MOCK-REPLY to: "${userText.slice(0, 80)}" (stream_options=${JSON.stringify(
+            body.stream_options ?? null,
+          )}, reasoning_effort=${body.reasoning_effort ?? 'none'})`;
+    for (const [i, word] of reply.split(' ').entries()) {
+      push({ content: (i > 0 ? ' ' : '') + word });
+    }
+    push({}, 'stop');
+  }
+  chunks.push({
+    id: 'mock-1',
+    object: 'chat.completion.chunk',
+    model: 'mock-model',
+    choices: [],
+    usage: { prompt_tokens: 123, completion_tokens: 42, total_tokens: 165 },
+  });
 
   if (!body.stream) {
+    // Non-streaming path (compaction summarize etc.) — text only.
     return Response.json({
       id: 'mock-1',
       object: 'chat.completion',
       model: 'mock-model',
-      choices: [{ index: 0, message: { role: 'assistant', content: reply }, finish_reason: 'stop' }],
-      usage: { prompt_tokens: 123, completion_tokens: words.length, total_tokens: 123 + words.length },
+      choices: [
+        { index: 0, message: { role: 'assistant', content: 'MOCK-NONSTREAM-REPLY' }, finish_reason: 'stop' },
+      ],
+      usage: { prompt_tokens: 123, completion_tokens: 42, total_tokens: 165 },
     });
   }
 
-  const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const send = (obj: unknown) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
-      for (let i = 0; i < words.length; i++) {
-        send({
-          id: 'mock-1',
-          object: 'chat.completion.chunk',
-          model: 'mock-model',
-          choices: [{ index: 0, delta: { content: (i > 0 ? ' ' : '') + words[i] }, finish_reason: null }],
-        });
-        await new Promise((r) => setTimeout(r, 25));
+      for (const c of chunks) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(c)}\n\n`));
+        await new Promise((r) => setTimeout(r, 15));
       }
-      send({
-        id: 'mock-1',
-        object: 'chat.completion.chunk',
-        model: 'mock-model',
-        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-      });
-      send({
-        id: 'mock-1',
-        object: 'chat.completion.chunk',
-        model: 'mock-model',
-        choices: [],
-        usage: { prompt_tokens: 123, completion_tokens: words.length, total_tokens: 123 + words.length },
-      });
       controller.enqueue(encoder.encode('data: [DONE]\n\n'));
       controller.close();
     },

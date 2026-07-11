@@ -454,13 +454,13 @@ function ApprovalRow({ item, session, sessionId, busy, setBusy, onAction }: RowP
   const [acted, setActed] = useState(false);
   const active = !item.decided && !acted && session?.pendingApproval?.approvalId === item.approvalId;
 
-  const decide = async (approved: boolean) => {
+  const decide = async (approved: boolean, scope: 'once' | 'always-similar' = 'once') => {
     setBusy(true);
     setActed(true);
     try {
       await api(`/api/sessions/${sessionId}/approvals/${item.approvalId}`, {
         method: 'POST',
-        body: JSON.stringify({ approved }),
+        body: JSON.stringify({ approved, scope }),
       });
       onAction();
     } catch {
@@ -495,6 +495,15 @@ function ApprovalRow({ item, session, sessionId, busy, setBusy, onAction }: RowP
             >
               Approve
             </button>
+            {item.tool === 'run_terminal' && (
+              <button
+                disabled={busy}
+                onClick={() => decide(true, 'always-similar')}
+                className="px-3 py-1 rounded-full bg-bg-2 text-fg-2 border border-border text-[11px] font-medium hover:text-fg disabled:opacity-30"
+              >
+                Approve similar
+              </button>
+            )}
             <button
               disabled={busy}
               onClick={() => decide(false)}

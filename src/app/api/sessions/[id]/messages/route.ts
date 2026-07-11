@@ -21,6 +21,12 @@ export async function POST(req: Request, { params }: { params: { id: string } })
   const text = typeof body?.text === 'string' ? body.text.trim() : '';
   if (!text) return Response.json({ error: 'text is required' }, { status: 400 });
 
+  // Answer to a pending ask_user question — resolves the waiting tool call.
+  const questionId = typeof body?.questionId === 'string' ? body.questionId : null;
+  if (questionId && rt.answerQuestion(params.id, questionId, text)) {
+    return Response.json({ ok: true, answered: true }, { status: 202 });
+  }
+
   const result = rt.handleUserMessage(params.id, text);
   return Response.json({ ok: true, ...result }, { status: 202 });
 }

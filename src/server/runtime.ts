@@ -24,6 +24,11 @@ export class SessionManager {
   readonly bus: EventBus;
   readonly store: SessionStore;
   private readonly active = new Map<string, ActiveRun>();
+  /** In-flight interactive waits (approvals / questions). Lost on restart —
+   *  the persisted pending* fields on the session re-arm the UI cards, and
+   *  the answering routes fall back to a wake() when no waiter exists. */
+  private readonly approvalWaiters = new Map<string, (approved: boolean) => void>();
+  private readonly questionWaiters = new Map<string, (answer: string) => void>();
 
   constructor(readonly config: AppConfig) {
     this.bus = new EventBus(config.dataDir);
@@ -110,9 +115,159 @@ export class SessionManager {
 
   cancelSession(sessionId: string): boolean {
     const act = this.active.get(sessionId);
+    // Reject any interactive waits and clear the persisted pendings.
+    const session = this.store.get(sessionId);
+    if (session?.pendingApproval) this.decideApproval(sessionId, session.pendingApproval.approvalId, false, true);
+    if (session?.pendingQuestion) {
+      const w = this.questionWaiters.get(session.pendingQuestion.questionId);
+      this.questionWaiters.delete(session.pendingQuestion.questionId);
+      this.store.update(sessionId, (r) => {
+        r.pendingQuestion = null;
+      });
+      w?.('[canceled by user]');
+    }
     if (!act) return false;
     act.abort.abort();
     return true;
+  }
+
+  // ---- interactive waits (used by tools via ToolCtx) ----
+
+  /** Emit approval.requested, persist the pending card, await the decision. */
+  requestApproval(args: {
+    sessionId: string;
+    agentRunId: string;
+    tool: string;
+    summary: string;
+    body?: string;
+    payload?: Record<string, unknown>;
+  }): Promise<boolean> {
+    const approvalId = ulid();
+    const { sessionId } = args;
+    const prevStatus = this.store.get(sessionId)?.status ?? 'running';
+    this.store.update(sessionId, (r) => {
+      r.pendingApproval = {
+        approvalId,
+        tool: args.tool,
+        summary: args.summary,
+        payload: args.payload ?? {},
+      };
+      r.status = 'awaiting_approval';
+    });
+    this.bus.emit(sessionId, 'session.status', { status: 'awaiting_approval' });
+    this.bus.emit(
+      sessionId,
+      'approval.requested',
+      { approvalId, tool: args.tool, summary: args.summary, body: args.body },
+      args.agentRunId,
+    );
+    return new Promise<boolean>((resolve) => {
+      this.approvalWaiters.set(approvalId, (approved) => {
+        this.store.update(sessionId, (r) => {
+          r.pendingApproval = null;
+          r.status = prevStatus === 'awaiting_approval' ? 'running' : prevStatus;
+        });
+        this.bus.emit(sessionId, 'session.status', { status: 'running' });
+        resolve(approved);
+      });
+    });
+  }
+
+  /** Route entry: resolve an approval card. Returns false when unknown. */
+  decideApproval(sessionId: string, approvalId: string, approved: boolean, silent = false): boolean {
+    const session = this.store.get(sessionId);
+    const pending = session?.pendingApproval;
+    if (!session || !pending || pending.approvalId !== approvalId) return false;
+    if (!silent) this.bus.emit(sessionId, 'approval.decided', { approvalId, approved });
+    const waiter = this.approvalWaiters.get(approvalId);
+    this.approvalWaiters.delete(approvalId);
+    if (waiter) {
+      waiter(approved);
+    } else {
+      // Server restarted since the card was raised: clear + wake the loop.
+      this.store.update(sessionId, (r) => {
+        r.pendingApproval = null;
+        r.status = 'idle';
+      });
+      this.wake(
+        sessionId,
+        `[approval decision] ${pending.tool}: ${approved ? 'APPROVED' : 'DENIED'} — continue accordingly.`,
+      );
+    }
+    return true;
+  }
+
+  /** Emit user.ask, persist the pending question, await the answer. */
+  askUser(args: {
+    sessionId: string;
+    agentRunId: string;
+    question: string;
+    kind: 'text' | 'single' | 'multi' | 'yes_no';
+    options?: string[];
+  }): Promise<string> {
+    const questionId = ulid();
+    const { sessionId } = args;
+    this.store.update(sessionId, (r) => {
+      r.pendingQuestion = { questionId, question: args.question, kind: args.kind, options: args.options };
+      r.status = 'awaiting_user';
+    });
+    this.bus.emit(sessionId, 'session.status', { status: 'awaiting_user' });
+    this.bus.emit(
+      sessionId,
+      'user.ask',
+      { questionId, question: args.question, kind: args.kind, options: args.options },
+      args.agentRunId,
+    );
+    return new Promise<string>((resolve) => {
+      this.questionWaiters.set(questionId, (answer) => {
+        this.store.update(sessionId, (r) => {
+          r.pendingQuestion = null;
+          r.status = 'running';
+        });
+        this.bus.emit(sessionId, 'session.status', { status: 'running' });
+        resolve(answer);
+      });
+    });
+  }
+
+  /** Route entry: answer a pending question. Returns false when it doesn't match. */
+  answerQuestion(sessionId: string, questionId: string, value: string): boolean {
+    const session = this.store.get(sessionId);
+    const pending = session?.pendingQuestion;
+    if (!session || !pending || pending.questionId !== questionId) return false;
+    this.bus.emit(sessionId, 'user.answer', { questionId, value });
+    const waiter = this.questionWaiters.get(questionId);
+    this.questionWaiters.delete(questionId);
+    if (waiter) {
+      waiter(value);
+    } else {
+      this.store.update(sessionId, (r) => {
+        r.pendingQuestion = null;
+        r.status = 'idle';
+      });
+      this.wake(sessionId, `[answer to your earlier question "${pending.question}"] ${value}`);
+    }
+    return true;
+  }
+
+  /** Dataset upload hook: record + notify the loop (steer or wake). */
+  notifyDatasetUpload(sessionId: string, fileName: string, sizeBytes: number): void {
+    this.store.update(sessionId, (r) => {
+      if (!r.datasetFiles.includes(fileName)) r.datasetFiles.push(fileName);
+    });
+    this.bus.emit(sessionId, 'agent.artifact', {
+      artifactKind: 'dataset',
+      label: fileName,
+      path: `dataset/${fileName}`,
+    });
+    this.bus.emit(sessionId, 'chat.message', {
+      role: 'system',
+      text: `Dataset uploaded: ${fileName} (${(sizeBytes / 1024 / 1024).toFixed(2)} MB)`,
+    });
+    const note = `[dataset uploaded] dataset/${fileName} (${(sizeBytes / 1024 / 1024).toFixed(2)} MB). Inspect it and tell the user what you found; ask for their goal if unknown.`;
+    const act = this.active.get(sessionId);
+    if (act) act.steering.push(note);
+    else this.wake(sessionId, note);
   }
 
   private startOrchestrator(sessionId: string, history: import('ai').ModelMessage[]): void {
@@ -128,6 +283,8 @@ export class SessionManager {
       cfg: this.config,
       bus: this.bus,
       store: this.store,
+      manager: this,
+      workspaceDir: this.workspaceDir(sessionId),
       steering,
       abort: abort.signal,
       depth: 0,
