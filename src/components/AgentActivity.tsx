@@ -103,7 +103,11 @@ function reduceTranscript(events: AgentEvent[]): Item[] {
         break;
       }
       case 'tool.called':
-        items.push({ key: e.id, type: 'tool', label: String(p.tool ?? 'tool') });
+        // Worker tool activity lives in the agent graph — chat only shows the
+        // orchestrator's own tool usage.
+        if (runId === 'orchestrator') {
+          items.push({ key: e.id, type: 'tool', label: String(p.tool ?? 'tool') });
+        }
         break;
       case 'user.ask':
         items.push({

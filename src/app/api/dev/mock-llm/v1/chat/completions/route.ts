@@ -38,8 +38,10 @@ export async function POST(req: Request) {
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
   const userText = textOf(lastUser?.content).replace(/^\[user interjection\]\s*/, '');
 
-  // Scripted tool call: `use tool <name> <json-args>`
-  const toolMatch = last?.role !== 'tool' ? /^use tool (\w+)\s+(\{[\s\S]*\})\s*$/m.exec(userText) : null;
+  // Scripted tool calls: one `use tool <name> <json-args>` per line; multiple
+  // lines in one message become multiple tool calls in ONE turn (parallel fan-out).
+  const toolMatches =
+    last?.role !== 'tool' ? [...userText.matchAll(/^use tool (\w+)\s+(\{.*\})\s*$/gm)] : [];
 
   const encoder = new TextEncoder();
   const chunks: unknown[] = [];
@@ -53,25 +55,28 @@ export async function POST(req: Request) {
 
   // Real providers guarantee syntactically valid JSON in function.arguments —
   // normalize through parse+stringify (tolerating raw newlines from test input).
-  let toolArgs: string | null = null;
-  if (toolMatch) {
+  const calls: { name: string; args: string }[] = [];
+  for (const m of toolMatches) {
     try {
-      toolArgs = JSON.stringify(JSON.parse(toolMatch[2].replace(/\r?\n/g, '\\n')));
+      calls.push({ name: m[1], args: JSON.stringify(JSON.parse(m[2])) });
     } catch {
-      toolArgs = null;
+      // skip malformed scripted call
     }
   }
 
-  if (toolMatch && toolArgs) {
-    const name = toolMatch[1];
-    push({ role: 'assistant', content: `Calling ${name} as instructed. ` });
-    push({
-      tool_calls: [{ index: 0, id: `call_${Date.now()}`, type: 'function', function: { name, arguments: '' } }],
-    });
-    // stream the arguments in two pieces like real providers do
-    const mid = Math.floor(toolArgs.length / 2);
-    push({ tool_calls: [{ index: 0, function: { arguments: toolArgs.slice(0, mid) } }] });
-    push({ tool_calls: [{ index: 0, function: { arguments: toolArgs.slice(mid) } }] });
+  if (calls.length > 0) {
+    push({ role: 'assistant', content: `Calling ${calls.map((c) => c.name).join(' + ')} as instructed. ` });
+    for (const [i, call] of calls.entries()) {
+      push({
+        tool_calls: [
+          { index: i, id: `call_${Date.now()}_${i}`, type: 'function', function: { name: call.name, arguments: '' } },
+        ],
+      });
+      // stream the arguments in two pieces like real providers do
+      const mid = Math.floor(call.args.length / 2);
+      push({ tool_calls: [{ index: i, function: { arguments: call.args.slice(0, mid) } }] });
+      push({ tool_calls: [{ index: i, function: { arguments: call.args.slice(mid) } }] });
+    }
     push({}, 'tool_calls');
   } else {
     const reply =

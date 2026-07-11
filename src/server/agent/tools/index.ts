@@ -38,7 +38,8 @@ export interface ToolSpec<I = unknown> {
   execute: (input: I, ctx: ToolCtx) => Promise<ToolOutcome>;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+// `any` erases the per-tool input generic inside the registry; executeToolCall
+// re-validates with the tool's own zod schema before execute() runs.
 type AnyToolSpec = ToolSpec<any>;
 
 const REGISTRY = new Map<string, AnyToolSpec>();

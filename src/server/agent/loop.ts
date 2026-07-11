@@ -9,6 +9,7 @@ import { classifyLlmError, createChatModel, type RawUsage } from './provider';
 import { costOfUsage, estimateUsage, isFreeTier, preflightGate, spentUsd } from './budget';
 import type { SteeringQueue } from './steering';
 import type { AgentDefinition, LoopResult } from './types';
+import { agentCatalog } from './registry';
 import { buildToolSet, executeToolCall, isParallelSafe, type ToolCtx, type ToolOutcome } from './tools/index';
 import './tools/all'; // registers all tools (side effect)
 
@@ -48,6 +49,9 @@ export async function runAgentLoop(run: AgentRunArgs): Promise<LoopResult> {
   const { sessionId, agentRunId, definition, messages, cfg, bus, store, steering, abort } = run;
   let turns = 0;
   let lastText = '';
+  // Workers stay silent in chat — their narration lives in the agent graph;
+  // only their final summary returns to the orchestrator.
+  const chatty = run.depth === 0;
 
   while (true) {
     if (abort.aborted) return { subtype: 'canceled', finalText: lastText };
@@ -120,10 +124,10 @@ export async function runAgentLoop(run: AgentRunArgs): Promise<LoopResult> {
         switch (part.type) {
           case 'text-delta':
             text += part.text;
-            bus.emit(sessionId, 'chat.delta', { channel: 'text', delta: part.text }, agentRunId);
+            if (chatty) bus.emit(sessionId, 'chat.delta', { channel: 'text', delta: part.text }, agentRunId);
             break;
           case 'reasoning-delta':
-            bus.emit(sessionId, 'chat.delta', { channel: 'thinking', delta: part.text }, agentRunId);
+            if (chatty) bus.emit(sessionId, 'chat.delta', { channel: 'thinking', delta: part.text }, agentRunId);
             break;
           case 'tool-call':
             toolCalls.push({ toolCallId: part.toolCallId, toolName: part.toolName, input: part.input });
@@ -146,7 +150,7 @@ export async function runAgentLoop(run: AgentRunArgs): Promise<LoopResult> {
     if (toolCalls.length === 0) {
       if (text.trim()) {
         messages.push({ role: 'assistant', content: text });
-        bus.emit(sessionId, 'chat.message', { role: 'assistant', text }, agentRunId);
+        if (chatty) bus.emit(sessionId, 'chat.message', { role: 'assistant', text }, agentRunId);
         lastText = text;
       }
       store.saveHistory(sessionId, agentRunId, messages);
@@ -170,7 +174,7 @@ export async function runAgentLoop(run: AgentRunArgs): Promise<LoopResult> {
     };
     messages.push(assistantMsg);
     if (text.trim()) {
-      bus.emit(sessionId, 'chat.message', { role: 'assistant', text }, agentRunId);
+      if (chatty) bus.emit(sessionId, 'chat.message', { role: 'assistant', text }, agentRunId);
       lastText = text;
     }
 
@@ -248,6 +252,10 @@ function resolveModel(cfg: AppConfig, definition: AgentDefinition): string {
 function composeSystem(run: AgentRunArgs): string {
   const { cfg, sessionId, definition, store } = run;
   const parts: string[] = [definition.systemPrompt];
+
+  if (definition.tools.includes('spawn_agent')) {
+    parts.push(`# Available specialist agents (spawn_agent)\n${agentCatalog(store, sessionId)}`);
+  }
 
   const memory = renderMemory(cfg.dataDir, sessionId);
   if (memory.trim()) {

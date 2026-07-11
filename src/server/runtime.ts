@@ -44,7 +44,29 @@ export class SessionManager {
     ensureMemory(this.config.dataDir, record.id);
     mkdirSync(this.workspaceDir(record.id), { recursive: true });
     this.bus.emit(record.id, 'session.status', { status: record.status });
+    // Root node of the agent graph.
+    this.bus.emit(
+      record.id,
+      'agent.spawned',
+      {
+        agentRunId: 'orchestrator',
+        parentRunId: null,
+        definitionId: 'orchestrator',
+        name: 'Orchestrator',
+        ephemeral: false,
+        agentKind: 'llm',
+      },
+      'orchestrator',
+    );
     return record;
+  }
+
+  /** Push a steering note into an active loop (no chat echo). */
+  steerSession(sessionId: string, note: string): boolean {
+    const act = this.active.get(sessionId);
+    if (!act) return false;
+    act.steering.push(note);
+    return true;
   }
 
   listSessions(): SessionRecord[] {
@@ -289,6 +311,7 @@ export class SessionManager {
     const steering = new SteeringQueue();
     const abort = new AbortController();
     this.setStatus(sessionId, 'running');
+    this.bus.emit(sessionId, 'agent.status', { status: 'working' }, 'orchestrator');
 
     const promise = runAgentLoop({
       sessionId,
@@ -311,6 +334,12 @@ export class SessionManager {
         if (session && !holdStates.includes(session.status)) {
           this.setStatus(sessionId, result.subtype === 'paused_budget' ? 'paused_budget' : 'idle');
         }
+        this.bus.emit(
+          sessionId,
+          'agent.status',
+          { status: result.subtype === 'error_during_execution' ? 'failed' : 'done' },
+          'orchestrator',
+        );
       })
       .catch((err) => {
         this.bus.emit(sessionId, 'error', { message: `Harness error: ${err instanceof Error ? err.message : err}` });

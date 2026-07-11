@@ -11,10 +11,12 @@ import { useEffect, useState } from 'react';
 import useSWR from 'swr';
 import { api, fetcher, uploadFile } from '@/lib/api';
 import { STATUS_TONE, type SessionListItem, type SessionRecord } from '@/lib/events';
+import { useSessionEvents } from '@/lib/sse';
 import { AgentActivity } from '@/components/AgentActivity';
+import { AgentGraph } from '@/components/AgentGraph';
 import { BudgetBar } from '@/components/BudgetBar';
 import { cn } from '@/lib/cn';
-import { Bot, Database, Loader2, Plus, Upload, XCircle } from 'lucide-react';
+import { Bot, Database, GitBranch, LineChart, Loader2, Plus, Upload, XCircle } from 'lucide-react';
 
 const ACCEPTED_DATASET_TYPES = '.csv,.tsv,.json,.jsonl,.txt,.md,.pdf,.docx,.html,.parquet,.xml,.yaml,.yml,.zip';
 
@@ -74,6 +76,15 @@ export default function PlaygroundPage() {
     fetcher,
     { refreshInterval: 2500 },
   );
+
+  // Center view: live agent graph vs training telemetry (M5).
+  const [view, setView] = useState<'agents' | 'training'>('agents');
+  const { events: graphEvents } = useSessionEvents(activeSessionId);
+  // Auto-switch to training when metrics start flowing.
+  useEffect(() => {
+    const last = graphEvents[graphEvents.length - 1];
+    if (last?.kind === 'train.metric') setView('training');
+  }, [graphEvents]);
 
   return (
     <div className="h-[calc(100vh-112px)] bg-black flex overflow-hidden">
@@ -201,6 +212,25 @@ export default function PlaygroundPage() {
             <div className="text-[10px] uppercase tracking-[0.3em] text-white/30 font-black">No active session</div>
           )}
           <div className="ml-auto flex items-center gap-4">
+            <div className="flex rounded-md border border-white/10 overflow-hidden">
+              {(
+                [
+                  { key: 'agents', label: 'Agents', Icon: GitBranch },
+                  { key: 'training', label: 'Training', Icon: LineChart },
+                ] as const
+              ).map(({ key, label, Icon }) => (
+                <button
+                  key={key}
+                  onClick={() => setView(key)}
+                  className={cn(
+                    'px-3 py-1.5 flex items-center gap-1.5 text-[9px] uppercase tracking-widest font-black transition-colors',
+                    view === key ? 'bg-white/10 text-white' : 'text-white/40 hover:text-white/70',
+                  )}
+                >
+                  <Icon className="w-3 h-3" /> {label}
+                </button>
+              ))}
+            </div>
             <BudgetBar session={sessionDetail} />
             {active && (
               <span
@@ -216,7 +246,17 @@ export default function PlaygroundPage() {
         </header>
 
         <div className="flex-1 relative">
-          <EmptyState hasSession={!!active} />
+          {active ? (
+            view === 'agents' ? (
+              <AgentGraph events={graphEvents} />
+            ) : (
+              <div className="h-full flex items-center justify-center text-[11px] uppercase tracking-widest text-white/30 font-black">
+                Training telemetry lands in M5
+              </div>
+            )
+          ) : (
+            <EmptyState hasSession={false} />
+          )}
         </div>
       </main>
 
