@@ -15,3 +15,4 @@ import './update-memory';
 import './hardware-probe';
 import './web';
 import './watch-training';
+import './register-model';

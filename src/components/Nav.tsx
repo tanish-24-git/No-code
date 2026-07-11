@@ -3,14 +3,11 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/cn';
-import { Brain, Github, ChevronDown, Settings, PlayCircle } from 'lucide-react';
+import { Brain, Github, Package, PlayCircle } from 'lucide-react';
 
 const links = [
   { href: '/playground', label: 'Playground', icon: <PlayCircle className="w-3.5 h-3.5" /> },
-  { href: '/settings', label: 'Settings', icon: <Settings className="w-3.5 h-3.5" /> },
-  { href: '/models', label: 'Models' },
-  { href: '/test', label: 'Evaluation' },
-  { href: '#', label: 'Docs' },
+  { href: '/models', label: 'Models', icon: <Package className="w-3.5 h-3.5" /> },
 ];
 
 export function Nav() {
