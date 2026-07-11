@@ -1,46 +1,21 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-*.csv
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-!frontend/src/lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+# --- Node / Next.js ---
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
 
-# Virtual Environment
-venv/
-ENV/
-env/
-.venv
-
-# Environment Variables
+# --- Environment ---
 .env
 .env.local
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# Project Specific
+# --- Runtime state ---
+# Session state, event logs, model registry (created at runtime)
 data/
+# Per-session agent working dirs: datasets, generated scripts, venvs, logs
+workspaces/
+
+# --- ML artifacts ---
 models/
 checkpoints/
 uploads/
@@ -49,16 +24,23 @@ artifacts/
 *.pth
 *.safetensors
 *.gguf
+*.csv
 
-# Logs
+# --- Python (backend/ until removal; generated scripts) ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# --- Logs ---
 *.log
 logs/
 
-# Database
-*.db
-*.sqlite
-
-# OS
+# --- IDE / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
 .DS_Store
 Thumbs.db
-node_modules
