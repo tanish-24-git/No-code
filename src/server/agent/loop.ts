@@ -6,7 +6,7 @@ import type { SessionManager } from '../runtime';
 import { capOutput } from '../exec/terminal';
 import { renderMemory } from './memory';
 import { classifyLlmError, createChatModel, type RawUsage } from './provider';
-import { costOfUsage, estimateUsage, spentUsd } from './budget';
+import { costOfUsage, estimateUsage, isFreeTier, preflightGate, spentUsd } from './budget';
 import type { SteeringQueue } from './steering';
 import type { AgentDefinition, LoopResult } from './types';
 import { buildToolSet, executeToolCall, isParallelSafe, type ToolCtx, type ToolOutcome } from './tools/index';
@@ -67,7 +67,35 @@ export async function runAgentLoop(run: AgentRunArgs): Promise<LoopResult> {
     // 2. System prompt is rebuilt EVERY turn — memory + budget survive compaction.
     const system = composeSystem(run);
 
-    // 3. Model call. Usage lands via the metering fetch shim.
+    // 3. Gate A — pre-flight projection BEFORE dispatching the call.
+    {
+      const session = store.get(sessionId);
+      const estPromptTokens = Math.ceil((system.length + JSON.stringify(messages).length) / 4);
+      const gate = preflightGate({
+        cfg,
+        spent: spentUsd(session?.ledger ?? []),
+        budgetUsd: session?.budgetUsd ?? cfg.budget.totalUsd,
+        estPromptTokens,
+        finalize: definition.finalize ?? false,
+      });
+      if (!gate.ok) {
+        store.saveHistory(sessionId, agentRunId, messages);
+        bus.emit(
+          sessionId,
+          'budget.exceeded',
+          {
+            spentUsd: gate.spentUsd,
+            budgetUsd: gate.budgetUsd,
+            deltaNeeded: gate.deltaNeededUsd,
+            projection: { nextCallCeilingUsd: gate.callCeilingUsd },
+          },
+          agentRunId,
+        );
+        return { subtype: 'paused_budget', finalText: lastText };
+      }
+    }
+
+    // 4. Model call. Usage lands via the metering fetch shim.
     let rawUsage: RawUsage | null = null;
     const model = createChatModel(cfg, resolveModel(cfg, definition), {
       onUsage: (u) => {
@@ -264,12 +292,13 @@ function recordUsage(
     });
   });
   if (updated) {
+    const spent = spentUsd(updated.ledger);
     bus.emit(
       sessionId,
       'budget.usage',
       {
         lastCallUsd: cost.usd,
-        spentUsd: spentUsd(updated.ledger),
+        spentUsd: spent,
         budgetUsd: updated.budgetUsd,
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
@@ -277,5 +306,20 @@ function recordUsage(
       },
       agentRunId,
     );
+    // Gate B — post-flight soft warning (once per budget level).
+    if (
+      !isFreeTier(cfg) &&
+      !updated.budgetWarned &&
+      spent >= updated.budgetUsd * cfg.budget.softFraction
+    ) {
+      store.update(sessionId, (rec) => {
+        rec.budgetWarned = true;
+      });
+      bus.emit(sessionId, 'budget.warning', {
+        spentUsd: spent,
+        budgetUsd: updated.budgetUsd,
+        message: `Budget ${Math.round((spent / updated.budgetUsd) * 100)}% consumed.`,
+      });
+    }
   }
 }

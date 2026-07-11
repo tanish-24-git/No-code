@@ -65,6 +65,8 @@ export interface SessionRecord {
   /** Effective budget: env value at creation + top-ups. */
   budgetUsd: number;
   ledger: LedgerEntry[];
+  /** Soft-warning emitted (once per budget level). */
+  budgetWarned: boolean;
   processes: ProcessRecord[];
   pendingApproval: PendingApproval | null;
   pendingQuestion: PendingQuestion | null;
@@ -114,6 +116,7 @@ export class SessionStore {
       planApproved: false,
       budgetUsd,
       ledger: [],
+      budgetWarned: false,
       processes: [],
       pendingApproval: null,
       pendingQuestion: null,

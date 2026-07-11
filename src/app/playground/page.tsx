@@ -10,8 +10,9 @@
 import { useEffect, useState } from 'react';
 import useSWR from 'swr';
 import { api, fetcher, uploadFile } from '@/lib/api';
-import { STATUS_TONE, type SessionListItem } from '@/lib/events';
+import { STATUS_TONE, type SessionListItem, type SessionRecord } from '@/lib/events';
 import { AgentActivity } from '@/components/AgentActivity';
+import { BudgetBar } from '@/components/BudgetBar';
 import { cn } from '@/lib/cn';
 import { Bot, Database, Loader2, Plus, Upload, XCircle } from 'lucide-react';
 
@@ -68,6 +69,11 @@ export default function PlaygroundPage() {
   };
 
   const active = sessions?.find((s) => s.id === activeSessionId);
+  const { data: sessionDetail } = useSWR<SessionRecord>(
+    activeSessionId ? `/api/sessions/${activeSessionId}` : null,
+    fetcher,
+    { refreshInterval: 2500 },
+  );
 
   return (
     <div className="h-[calc(100vh-112px)] bg-black flex overflow-hidden">
@@ -194,7 +200,8 @@ export default function PlaygroundPage() {
           ) : (
             <div className="text-[10px] uppercase tracking-[0.3em] text-white/30 font-black">No active session</div>
           )}
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex items-center gap-4">
+            <BudgetBar session={sessionDetail} />
             {active && (
               <span
                 className={cn(

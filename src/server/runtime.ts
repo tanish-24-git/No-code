@@ -250,6 +250,21 @@ export class SessionManager {
     return true;
   }
 
+  /** Budget top-up: raise the ceiling and resume a budget-paused loop. */
+  topUpBudget(sessionId: string, addUsd: number): { newBudgetUsd: number } | null {
+    const rec = this.store.update(sessionId, (r) => {
+      r.budgetUsd = Math.round((r.budgetUsd + addUsd) * 100) / 100;
+      r.budgetWarned = false; // re-arm the soft warning for the new level
+    });
+    if (!rec) return null;
+    this.bus.emit(sessionId, 'budget.topup', { addUsd, newBudgetUsd: rec.budgetUsd });
+    if (rec.status === 'paused_budget') {
+      this.setStatus(sessionId, 'idle');
+      this.wake(sessionId, `[budget increased to $${rec.budgetUsd.toFixed(2)} — continue where you left off]`);
+    }
+    return { newBudgetUsd: rec.budgetUsd };
+  }
+
   /** Dataset upload hook: record + notify the loop (steer or wake). */
   notifyDatasetUpload(sessionId: string, fileName: string, sizeBytes: number): void {
     this.store.update(sessionId, (r) => {
