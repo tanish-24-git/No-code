@@ -44,3 +44,6 @@ logs/
 *.swo
 .DS_Store
 Thumbs.db
+
+# Local AI-tooling config
+.claude/

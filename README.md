@@ -17,7 +17,7 @@ No hardcoded pipelines. No Docker. No rate limiting — a **dollar budget** you 
 
 ## What it is
 
-FineTune Studio is a local-first, no-code LLM fine-tuning studio built as an **agentic harness** (the Claude Code pattern): instead of shipping pre-written pipelines that only handle datasets they anticipated, an orchestrator agent **generates Python scripts tailored to *your* dataset** — probes, preprocessing, `train.py`, evaluation — and runs them in a terminal inside an isolated workspace. Dependencies are installed on demand with [uv](https://docs.astral.sh/uv/); the base install is just Node.
+FineTune Studio is a local-first, no-code LLM fine-tuning studio built as an **agentic harness** — the same pattern as modern coding agents: instead of shipping pre-written pipelines that only handle datasets they anticipated, an orchestrator agent **generates Python scripts tailored to *your* dataset** — probes, preprocessing, `train.py`, evaluation — and runs them in a terminal inside an isolated workspace. Dependencies are installed on demand with [uv](https://docs.astral.sh/uv/); the base install is just Node.
 
 ```
 you:    *drops messy CSV*  "make me a support-answer bot"
@@ -79,7 +79,7 @@ Every model call is metered against `LLM_BUDGET_USD` with **two gates**: a pre-f
 | Mode | Behavior |
 | --- | --- |
 | `plan` (default) | The agent proposes ONE master plan; after you approve, all generated scripts auto-run. HF upload always asks. |
-| `every-command` | Claude Code style — every terminal command shows an approval card ("Approve similar" allowlists a command family). |
+| `every-command` | Every terminal command shows an approval card ("Approve similar" allowlists a command family). |
 | `auto` | No gates except HF upload and budget top-ups. |
 
 ## How it works

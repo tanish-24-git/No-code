@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 /**
- * FINETUNE.md — the session's persistent memory (the CLAUDE.md analog).
+ * FINETUNE.md — the session's persistent memory file.
  * Re-injected into EVERY model request for EVERY agent, so standing user
  * directives and key facts survive context compaction. Mutated only via the
  * update_memory tool (never free-form writes).
