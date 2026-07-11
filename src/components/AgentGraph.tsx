@@ -254,22 +254,30 @@ export function AgentGraph({ events }: { events: AgentEvent[] }) {
   }
 
   return (
-    <ReactFlowProvider>
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        nodeTypes={nodeTypes}
-        fitView
-        fitViewOptions={{ padding: 0.25, maxZoom: 1.1 }}
-        proOptions={{ hideAttribution: true }}
-        nodesDraggable={false}
-        nodesConnectable={false}
-        elementsSelectable={false}
-        zoomOnScroll
-        panOnDrag
-      >
-        <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="rgba(255,255,255,0.06)" />
-      </ReactFlow>
-    </ReactFlowProvider>
+    // React Flow needs an explicitly-sized parent (warning #004) — the
+    // playground slots this into a flex-1 container, so fill it.
+    <div className="h-full w-full">
+      <ReactFlowProvider>
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          nodeTypes={nodeTypes}
+          fitView
+          fitViewOptions={FIT_VIEW_OPTIONS}
+          proOptions={PRO_OPTIONS}
+          nodesDraggable={false}
+          nodesConnectable={false}
+          elementsSelectable={false}
+          zoomOnScroll
+          panOnDrag
+        >
+          <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="rgba(255,255,255,0.06)" />
+        </ReactFlow>
+      </ReactFlowProvider>
+    </div>
   );
 }
+
+// Stable identities — new objects per render trip React Flow warning #002.
+const FIT_VIEW_OPTIONS = { padding: 0.25, maxZoom: 1.1 };
+const PRO_OPTIONS = { hideAttribution: true };

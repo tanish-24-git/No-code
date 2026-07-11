@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo } from 'react';
+import React from 'react';
 import ReactFlow, {
   Background,
   BackgroundVariant,
@@ -242,26 +242,27 @@ const FLOW_DATA = {
   },
 };
 
+// Module scope: stable identity across renders AND strict-mode double-mounts
+// (useMemo inside the component still trips React Flow warning #002 in dev).
+const HERO_NODE_TYPES = {
+  trigger: TriggerNode,
+  agent: AgentNode,
+  logic: LogicNode,
+  circle: CircleNode,
+};
+const HERO_FIT_VIEW = { padding: 0.25 };
+
 function FlowContent({ activeTab }: { activeTab: string }) {
   const { nodes, edges } = (FLOW_DATA as any)[activeTab] || FLOW_DATA.data;
-
-  const nodeTypes = useMemo(() => ({
-    trigger: TriggerNode,
-    agent: AgentNode,
-    logic: LogicNode,
-    circle: CircleNode,
-  }), []);
-
-  const fitViewOptions = useMemo(() => ({ padding: 0.25 }), []);
 
   return (
     <div className="w-full h-full bg-[#0a0a0c] relative">
       <ReactFlow
         nodes={nodes}
         edges={edges}
-        nodeTypes={nodeTypes}
+        nodeTypes={HERO_NODE_TYPES}
         fitView
-        fitViewOptions={fitViewOptions}
+        fitViewOptions={HERO_FIT_VIEW}
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable={false}
