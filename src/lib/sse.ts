@@ -1,81 +1,42 @@
-/**
- * Hooks for consuming agent-runtime SSE streams. The session events endpoint
- * sends one frame per AgentEvent: `event: <Kind>\ndata: <json>\n\n`. We parse
- * those into typed AgentEvent objects and append them to a list.
- */
 'use client';
 
+/**
+ * Per-session event stream. All frames are unnamed SSE `message` events with
+ * the kind inside the JSON — one onmessage handler, no per-kind listener
+ * registry to keep in sync. The server sends `id:` on every frame, so
+ * EventSource's native Last-Event-ID reconnect resumes without duplicates
+ * (a seen-id set guards the edge cases anyway).
+ */
 import { useEffect, useRef, useState } from 'react';
-import { sseUrl } from './api';
-import type { AgentEvent } from './types';
+import type { AgentEvent } from './events';
 
-export function useSessionEvents(sessionId: string | null | undefined) {
+export function useSessionEvents(sessionId: string | null) {
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [connected, setConnected] = useState(false);
-  const [closed, setClosed] = useState(false);
-  const sessionRef = useRef<string | null>(null);
+  const seen = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    if (!sessionId) return;
-    // Reset state when a new session is bound.
-    sessionRef.current = sessionId;
     setEvents([]);
     setConnected(false);
-    setClosed(false);
+    seen.current = new Set();
+    if (!sessionId) return;
 
-    const es = new EventSource(sseUrl(`/api/sessions/${sessionId}/events`));
-    const handle = (kind: string) => (e: MessageEvent) => {
-      if (sessionRef.current !== sessionId) return;
-      try {
-        const payload = JSON.parse(e.data) as AgentEvent;
-        setEvents((prev) => [...prev, payload]);
-        if (kind === 'SessionClosed') setClosed(true);
-      } catch {
-        // Ignore malformed frames; the keepalive comments are filtered out.
-      }
-    };
-
-    // EventSource only fires `message` for unnamed events; named events need
-    // explicit listeners. The backend always emits a name, so we listen to
-    // every kind we care about. Unknown kinds still come through `message`.
-    const KNOWN: string[] = [
-      'SessionStarted', 'SessionClosed',
-      'DatasetUploaded', 'IntakeStarted', 'IntakeCompleted',
-      'DatasetProfileStarted', 'DatasetProfileCompleted',
-      'DataHealthReport',
-      'TaskInferred', 'IntentConfidenceLow',
-      'UserClarificationRequested', 'UserClarificationReceived',
-      'HardwareProfileStarted', 'HardwareProfileCompleted',
-      'CandidateModelsRanked', 'StrategyChosen',
-      'PipelineDraftRequested', 'PipelineDraftCreated',
-      'PipelineApprovalRequested', 'PipelineApproved', 'PipelineRejected',
-      'PipelineExecutionStarted',
-      'TrainingMetricUpdated', 'TrainingAnomalyDetected',
-      'RecoveryPlanGenerated', 'RetryRequested', 'RetryApproved', 'RetryDenied',
-      'TrainingCompleted', 'EvaluationStarted', 'EvaluationCompleted',
-      'ExportChoiceRequested', 'SaveLocalRequested', 'PushToHFRequested',
-      'ExportCompleted',
-      'PhaseStarted', 'PhaseCompleted', 'PhasePlanProposed', 'PhaseApproved', 'PhaseCommented',
-      'NodeMaterialized', 'EdgeMaterialized',
-      'DataHealthReport', 'DatasetRestructured',
-      'AgentThinking', 'AgentPlanning', 'AgentAsking', 'AgentGarnishing', 'AgentExecuting',
-      'BlackboardUpdated',
-      'AuditCritique', 'AuditOverride',
-      'SandboxBenchmarkStarted', 'SandboxBenchmarkCompleted',
-      'CircuitBreakerTripped', 'CheckpointSaved',
-      'AssistantMessage', 'UserMessage',
-      'AgentToolCalled', 'AgentDecisionRecorded', 'Error',
-    ];
-    KNOWN.forEach((k) => es.addEventListener(k, handle(k)));
-
+    const es = new EventSource(`/api/sessions/${sessionId}/events`);
     es.onopen = () => setConnected(true);
     es.onerror = () => setConnected(false);
-
-    return () => {
-      es.close();
-      sessionRef.current = null;
+    es.onmessage = (e: MessageEvent<string>) => {
+      try {
+        const event = JSON.parse(e.data) as AgentEvent;
+        if (event.sessionId !== sessionId) return;
+        if (seen.current.has(event.id)) return;
+        seen.current.add(event.id);
+        setEvents((prev) => [...prev, event]);
+      } catch {
+        // keepalive comments / malformed frames
+      }
     };
+    return () => es.close();
   }, [sessionId]);
 
-  return { events, connected, closed };
+  return { events, connected };
 }

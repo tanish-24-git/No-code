@@ -1,206 +1,232 @@
 'use client';
 
 /**
- * Agent chat surface (ChatGPT-style).
+ * Agent chat surface (ChatGPT-style), driven by event taxonomy v2.
  *
- * Plain neutral theme. AI bubbles align left, user bubbles align right. No
- * coloured cards, no logos, no status pills - the goal is for the user to
- * read this like a normal conversation.
- *
- * Inline action affordances replace the old card-based UI:
- *   - clarification questions render as a chat bubble with chips below
- *   - phase plans render as a chat bubble with [approve] / [comment] under it
- *   - pipeline draft + approval, recovery, export - same idea, all inline
+ * The reducer turns the append-only event stream into a transcript:
+ *   - chat.delta frames coalesce into a live streaming bubble per agent run;
+ *     the final chat.message replaces the accumulated deltas.
+ *   - thinking deltas render as a dimmed live bubble, dropped once the
+ *     final message lands.
+ *   - user.ask / approval.requested / budget.exceeded render as inline
+ *     actionable rows (chips / buttons / top-up), gated on the session's
+ *     pending state so stale cards never re-arm after a reload.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import useSWR from 'swr';
 import { api, fetcher } from '@/lib/api';
 import { useSessionEvents } from '@/lib/sse';
 import { cn } from '@/lib/cn';
-import type { AgentEvent, AgentSession, EventKind } from '@/lib/types';
-import { Loader2, Send } from 'lucide-react';
+import {
+  STATUS_LABEL,
+  spentUsd,
+  type AgentEvent,
+  type SessionRecord,
+} from '@/lib/events';
+import { Loader2, Send, Wrench } from 'lucide-react';
 
+// ── Transcript reducer ────────────────────────────────────────────────────
 
-// ── Folding rules ─────────────────────────────────────────────────────────
-//
-// Anything that maps to a chat bubble lives in CHAT_KINDS. Internal events
-// (tool calls, decision records, intake progress, etc.) get folded into a
-// single "still working..." indicator near the bottom of the transcript.
+type Item =
+  | { key: string; type: 'user'; text: string }
+  | { key: string; type: 'assistant'; text: string; streaming: boolean; runId: string }
+  | { key: string; type: 'thinking'; text: string; runId: string }
+  | { key: string; type: 'system'; text: string }
+  | { key: string; type: 'error'; text: string }
+  | { key: string; type: 'tool'; label: string }
+  | { key: string; type: 'ask'; questionId: string; question: string; kind: string; options?: string[]; answered: boolean }
+  | { key: string; type: 'approval'; approvalId: string; tool: string; summary: string; body?: string; decided: boolean; approved?: boolean }
+  | { key: string; type: 'budget'; spentUsd: number; budgetUsd: number; deltaNeeded?: number; resolved: boolean };
 
-const CHAT_KINDS: ReadonlySet<EventKind> = new Set([
-  'AssistantMessage',
-  'UserMessage',
-  'PhasePlanProposed',
-  'UserClarificationRequested',
-  'UserClarificationReceived',
-  'PipelineApprovalRequested',
-  'TrainingCompleted',
-  'EvaluationCompleted',
-  'ExportChoiceRequested',
-  'ExportCompleted',
-  'TrainingAnomalyDetected',
-  'RecoveryPlanGenerated',
-  'SessionClosed',
-  'Error',
-]);
+const THINKING_TAIL = 600;
 
-const STAGE_LABEL: Record<string, string> = {
-  init: 'Initializing',
-  profiling: 'Profiling dataset',
-  clarifying: 'Awaiting clarification',
-  planning: 'Drafting pipeline',
-  awaiting_approval: 'Awaiting approval',
-  executing: 'Starting training',
-  monitoring: 'Training',
-  recovering: 'Recovering',
-  evaluating: 'Evaluating',
-  awaiting_export_choice: 'Awaiting export choice',
-  finalizing: 'Finalizing',
-  done: 'Complete',
-  failed: 'Failed',
-  cancelled: 'Cancelled',
-};
+function reduceTranscript(events: AgentEvent[]): Item[] {
+  const items: Item[] = [];
+  const sorted = [...events].sort((a, b) => (a.id < b.id ? -1 : 1));
 
+  const last = () => items[items.length - 1];
+  const dropTrailingThinking = (runId: string) => {
+    const l = last();
+    if (l && l.type === 'thinking' && l.runId === runId) items.pop();
+  };
+
+  for (const e of sorted) {
+    const runId = e.agentRunId ?? 'system';
+    const p = e.payload as Record<string, unknown>;
+    switch (e.kind) {
+      case 'chat.message': {
+        const role = String(p.role);
+        const text = String(p.text ?? '');
+        if (role === 'user') {
+          items.push({ key: e.id, type: 'user', text });
+        } else if (role === 'system') {
+          items.push({ key: e.id, type: 'system', text });
+        } else {
+          dropTrailingThinking(runId);
+          // Replace the streaming bubble this message finalizes.
+          for (let i = items.length - 1; i >= 0; i--) {
+            const it = items[i];
+            if (it.type === 'assistant' && it.runId === runId) {
+              if (it.streaming) {
+                it.text = text;
+                it.streaming = false;
+              } else {
+                items.push({ key: e.id, type: 'assistant', text, streaming: false, runId });
+              }
+              break;
+            }
+            if (i === 0) items.push({ key: e.id, type: 'assistant', text, streaming: false, runId });
+          }
+          if (items.length === 0) items.push({ key: e.id, type: 'assistant', text, streaming: false, runId });
+        }
+        break;
+      }
+      case 'chat.delta': {
+        const delta = String(p.delta ?? '');
+        if (!delta) break;
+        if (p.channel === 'thinking') {
+          const l = last();
+          if (l && l.type === 'thinking' && l.runId === runId) {
+            l.text = (l.text + delta).slice(-THINKING_TAIL);
+          } else {
+            items.push({ key: e.id, type: 'thinking', text: delta, runId });
+          }
+        } else {
+          const l = last();
+          if (l && l.type === 'assistant' && l.streaming && l.runId === runId) {
+            l.text += delta;
+          } else {
+            dropTrailingThinking(runId);
+            items.push({ key: e.id, type: 'assistant', text: delta, streaming: true, runId });
+          }
+        }
+        break;
+      }
+      case 'tool.called':
+        items.push({ key: e.id, type: 'tool', label: String(p.tool ?? 'tool') });
+        break;
+      case 'user.ask':
+        items.push({
+          key: e.id,
+          type: 'ask',
+          questionId: String(p.questionId ?? ''),
+          question: String(p.question ?? ''),
+          kind: String(p.kind ?? 'text'),
+          options: Array.isArray(p.options) ? (p.options as string[]) : undefined,
+          answered: false,
+        });
+        break;
+      case 'user.answer': {
+        const qid = String(p.questionId ?? '');
+        for (const it of items) {
+          if (it.type === 'ask' && it.questionId === qid) it.answered = true;
+        }
+        items.push({ key: e.id, type: 'user', text: String(p.value ?? '') });
+        break;
+      }
+      case 'approval.requested':
+        items.push({
+          key: e.id,
+          type: 'approval',
+          approvalId: String(p.approvalId ?? ''),
+          tool: String(p.tool ?? ''),
+          summary: String(p.summary ?? ''),
+          body: typeof p.body === 'string' ? p.body : undefined,
+          decided: false,
+        });
+        break;
+      case 'approval.decided': {
+        const aid = String(p.approvalId ?? '');
+        for (const it of items) {
+          if (it.type === 'approval' && it.approvalId === aid) {
+            it.decided = true;
+            it.approved = Boolean(p.approved);
+          }
+        }
+        break;
+      }
+      case 'budget.exceeded':
+        items.push({
+          key: e.id,
+          type: 'budget',
+          spentUsd: Number(p.spentUsd ?? 0),
+          budgetUsd: Number(p.budgetUsd ?? 0),
+          deltaNeeded: typeof p.deltaNeeded === 'number' ? p.deltaNeeded : undefined,
+          resolved: false,
+        });
+        break;
+      case 'budget.topup': {
+        for (const it of items) {
+          if (it.type === 'budget') it.resolved = true;
+        }
+        items.push({ key: e.id, type: 'system', text: `Budget increased to $${Number(p.newBudgetUsd ?? 0).toFixed(2)}.` });
+        break;
+      }
+      case 'error':
+        items.push({ key: e.id, type: 'error', text: String(p.message ?? '') });
+        break;
+      default:
+        break;
+    }
+  }
+  return items;
+}
+
+// ── Component ─────────────────────────────────────────────────────────────
 
 type Props = { sessionId: string | null };
 
 export function AgentActivity({ sessionId }: Props) {
-  const { events, connected, closed } = useSessionEvents(sessionId);
-  const { data: session, mutate: mutateSession } = useSWR<AgentSession>(
+  const { events, connected } = useSessionEvents(sessionId);
+  const { data: session, mutate: mutateSession } = useSWR<SessionRecord>(
     sessionId ? `/api/sessions/${sessionId}` : null,
     fetcher,
-    { refreshInterval: 1500 },
+    { refreshInterval: 2000 },
   );
   const scrollRef = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (events.length === 0) return;
-    const last = events[events.length - 1];
-    if ([
-      'TaskInferred',
-      'UserClarificationRequested',
-      'UserClarificationReceived',
-      'PhasePlanProposed',
-      'PhaseApproved',
-      'PhaseStarted',
-      'IntakeCompleted',
-      'DatasetProfileCompleted',
-      'PipelineDraftCreated',
-      'PipelineApprovalRequested',
-      'PipelineApproved',
-      'TrainingCompleted',
-      'EvaluationCompleted',
-      'ExportChoiceRequested',
-      'ExportCompleted',
-      'SessionClosed',
-      'Error',
-    ].includes(last.kind)) {
+    const lastEvent = events[events.length - 1];
+    if (!lastEvent) return;
+    if (['session.status', 'user.ask', 'user.answer', 'approval.requested', 'approval.decided', 'budget.exceeded', 'budget.topup'].includes(lastEvent.kind)) {
       mutateSession();
     }
   }, [events, mutateSession]);
 
-  const transcript = useMemo(() => {
-    const unique = new Map<string, AgentEvent>();
-    
-    // Sort events by time first so we process them in order.
-    const sorted = [...events].sort((a, b) => 
-      new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-    );
+  const transcript = useMemo(() => reduceTranscript(events), [events]);
 
-    sorted.forEach((e) => {
-      // Logic for deduplication:
-      // 1. If it's a PhasePlanProposed, use the phase as the key.
-      //    We want the LATEST one for that phase.
-      // 2. Otherwise use the event.id.
-      let key = e.id;
-      if (e.kind === 'PhasePlanProposed') {
-        key = `phase-${e.payload.phase}`;
-        // For phases, we actually want to OVERWRITE with the latest one 
-        // in case the agent re-emitted it with updated steps/summary.
-        unique.set(key, e);
-        return;
-      }
-      
-      // For general events (messages, status), we keep the first occurrence 
-      // of an ID to avoid SSE-reconnect duplicates.
-      if (!unique.has(key)) {
-        unique.set(key, e);
-      }
-    });
-
-    const raw = Array.from(unique.values())
-      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
-      .filter((e) => CHAT_KINDS.has(e.kind));
-
-    const result: AgentEvent[] = [];
-
-    for (const e of raw) {
-      const payload = { ...e.payload };
-      const last = result[result.length - 1];
-
-      // Delta grouping logic for AssistantMessage and AgentThinking
-      const currentDelta = payload.delta as string | undefined;
-
-      if (
-        (e.kind === 'AssistantMessage' || e.kind === 'AgentThinking') &&
-        currentDelta !== undefined
-      ) {
-        if (
-          last &&
-          last.kind === e.kind &&
-          last.parent_event_id === e.parent_event_id &&
-          last.actor === e.actor
-        ) {
-          const prevText = (last.payload.text as string) || '';
-          last.payload.text = prevText + currentDelta;
-          continue;
-        }
-        payload.text = currentDelta;
-      }
-
-      result.push({ ...e, payload });
-    }
-    return result;
-  }, [events]);
-  const hasInternalChatter = useMemo(
-    () => events.some((e) => !CHAT_KINDS.has(e.kind) && e.kind !== 'NodeMaterialized'),
-    [events],
-  );
-  const stillWorking = !closed && hasInternalChatter && transcript.length > 0;
+  const lastItem = transcript[transcript.length - 1];
+  const streamingNow = !!lastItem && ((lastItem.type === 'assistant' && lastItem.streaming) || lastItem.type === 'thinking');
+  const working = session?.status === 'running' && !streamingNow;
 
   const isAtBottom = useRef(true);
-
   const handleScroll = () => {
     if (!scrollRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
-    const threshold = 150;
-    isAtBottom.current = scrollHeight - scrollTop - clientHeight < threshold;
+    isAtBottom.current = scrollHeight - scrollTop - clientHeight < 150;
   };
-
-  const lastMessageText = transcript[transcript.length - 1]?.payload?.text;
+  const lastText = lastItem && 'text' in lastItem ? lastItem.text : '';
   useEffect(() => {
     if (isAtBottom.current) {
       scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
     }
-  }, [transcript.length, lastMessageText]);
+  }, [transcript.length, lastText]);
 
   if (!sessionId) {
     return (
       <div className="flex-1 flex items-center justify-center p-12">
-        <div className="text-center text-[12px] text-fg-3">
-          Upload a dataset to start a session.
-        </div>
+        <div className="text-center text-[12px] text-fg-3">Create a session to talk to the agent.</div>
       </div>
     );
   }
 
   return (
     <div className="flex-1 flex flex-col min-h-0 bg-bg">
-      <Header session={session} connected={connected} closed={closed} />
+      <Header session={session} connected={connected} />
 
-      <div 
-        ref={scrollRef} 
+      <div
+        ref={scrollRef}
         onScroll={handleScroll}
         onWheel={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
         onTouchMove={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
@@ -208,129 +234,111 @@ export function AgentActivity({ sessionId }: Props) {
         data-lenis-prevent="true"
       >
         {transcript.length === 0 && (
-          <div className="flex items-center gap-2 text-[12px] text-fg-3">
-            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            <span>Booting agents...</span>
+          <div className="text-[12px] text-fg-3">
+            Tell the agent what you want to fine-tune — or upload a dataset to get started.
           </div>
         )}
-        {transcript.map((e) => (
-          <ChatRow
-            key={e.id}
-            event={e}
+        {transcript.map((item) => (
+          <Row
+            key={item.key}
+            item={item}
             session={session}
             sessionId={sessionId}
-            onAction={() => mutateSession()}
             busy={busy}
             setBusy={setBusy}
+            onAction={() => mutateSession()}
           />
         ))}
-        {stillWorking && <Working />}
+        {working && <Working />}
       </div>
 
-      <MessageBar sessionId={sessionId} disabled={closed} />
+      <MessageBar sessionId={sessionId} />
     </div>
   );
 }
 
-
-function Header({
-  session,
-  connected,
-  closed,
-}: {
-  session?: AgentSession;
-  connected: boolean;
-  closed: boolean;
-}) {
-  const stage = session ? STAGE_LABEL[session.state] ?? session.state : 'Connecting...';
-  const live = !closed && connected;
+function Header({ session, connected }: { session?: SessionRecord; connected: boolean }) {
+  const label = session ? STATUS_LABEL[session.status] ?? session.status : 'Connecting…';
+  const spent = spentUsd(session?.ledger);
   return (
     <div className="px-5 py-3 border-b border-border-2 bg-bg flex items-center gap-3">
-      <span
-        className={cn(
-          'w-1.5 h-1.5 rounded-full',
-          live ? 'bg-fg-2' : closed ? 'bg-fg-3' : 'bg-fg-3',
-        )}
-      />
-      <span className="text-[11px] text-fg-2">{stage}</span>
-      {session && session.confidence > 0 && (
+      <span className={cn('w-1.5 h-1.5 rounded-full', connected ? 'bg-success' : 'bg-fg-3')} />
+      <span className="text-[11px] text-fg-2">{label}</span>
+      {session && (
         <span className="ml-auto text-[10px] text-fg-3 font-mono">
-          conf {Math.round(session.confidence * 100)}%
+          ${spent.toFixed(4)} / ${session.budgetUsd.toFixed(2)}
         </span>
       )}
     </div>
   );
 }
 
-
 function Working() {
   return (
     <div className="flex justify-start">
       <div className="px-3 py-1.5 text-[11px] text-fg-3 flex items-center gap-2">
         <Loader2 className="w-3 h-3 animate-spin" />
-        <span>working...</span>
+        <span>working…</span>
       </div>
     </div>
   );
 }
 
-
-// ── Chat row dispatch ─────────────────────────────────────────────────────
+// ── Rows ──────────────────────────────────────────────────────────────────
 
 type RowProps = {
-  event: AgentEvent;
-  session?: AgentSession;
+  item: Item;
+  session?: SessionRecord;
   sessionId: string;
-  onAction: () => void;
   busy: boolean;
   setBusy: (v: boolean) => void;
+  onAction: () => void;
 };
 
-function ChatRow(props: RowProps) {
-  const { event } = props;
-  switch (event.kind) {
-    case 'UserMessage':
-      return <Bubble side="right" text={String(event.payload.text ?? '')} />;
-    case 'AssistantMessage':
-      return <Bubble side="left" text={String(event.payload.text ?? '')} />;
-    case 'PhasePlanProposed':
-      return <PhasePlanRow {...props} />;
-    case 'UserClarificationRequested':
-      return <ClarificationRow {...props} />;
-    case 'UserClarificationReceived':
+function Row(props: RowProps) {
+  const { item } = props;
+  switch (item.type) {
+    case 'user':
+      return <Bubble side="right" text={item.text} />;
+    case 'assistant':
+      return <Bubble side="left" text={item.text} streaming={item.streaming} />;
+    case 'thinking':
       return (
-        <Bubble
-          side="right"
-          text={`> ${stringifyValue((event.payload.answer as { value?: unknown })?.value)}`}
-        />
+        <div className="flex justify-start">
+          <div className="max-w-[88%] px-4 py-2 rounded-2xl text-[11px] leading-relaxed whitespace-pre-wrap break-words bg-bg-2/50 text-fg-3 italic border border-border/50">
+            {item.text}
+          </div>
+        </div>
       );
-    case 'PipelineApprovalRequested':
-      return <ApprovalRow {...props} />;
-    case 'ExportChoiceRequested':
-      return <ExportRow {...props} />;
-    case 'TrainingCompleted':
-      return <Bubble side="left" text="Training finished." />;
-    case 'EvaluationCompleted':
-      return <EvaluationRow event={event} />;
-    case 'ExportCompleted':
-      return <Bubble side="left" text={`Exported. ${summariseExport(event.payload.export)}`} />;
-    case 'TrainingAnomalyDetected':
-      return <Bubble side="left" text={`Anomaly detected: ${event.payload.reason ?? event.payload.anomaly}`} />;
-    case 'RecoveryPlanGenerated':
-      return <RecoveryRow event={event} />;
-    case 'SessionClosed':
-      return <Bubble side="left" text="Session closed." />;
-    case 'Error':
-      return <Bubble side="left" text={`Error: ${event.payload.error ?? ''}`} />;
+    case 'system':
+      return <div className="text-center text-[10px] text-fg-3 py-1">{item.text}</div>;
+    case 'error':
+      return (
+        <div className="flex justify-start">
+          <div className="max-w-[88%] px-4 py-2.5 rounded-2xl text-[12px] leading-relaxed whitespace-pre-wrap break-words bg-danger/10 text-danger border border-danger/20">
+            {item.text}
+          </div>
+        </div>
+      );
+    case 'tool':
+      return (
+        <div className="flex items-center gap-1.5 text-[10px] text-fg-3 pl-1">
+          <Wrench className="w-3 h-3" />
+          <span className="font-mono">{item.label}</span>
+        </div>
+      );
+    case 'ask':
+      return <AskRow {...props} item={item} />;
+    case 'approval':
+      return <ApprovalRow {...props} item={item} />;
+    case 'budget':
+      return <BudgetRow {...props} item={item} />;
     default:
       return null;
   }
 }
 
-
-// ── Bubble ────────────────────────────────────────────────────────────────
-
-function Bubble({ side, text, children }: { side: 'left' | 'right'; text?: string; children?: React.ReactNode }) {
+function Bubble({ side, text, streaming, children }: { side: 'left' | 'right'; text?: string; streaming?: boolean; children?: React.ReactNode }) {
   return (
     <div className={cn('flex', side === 'right' && 'justify-end')}>
       <div
@@ -342,105 +350,94 @@ function Bubble({ side, text, children }: { side: 'left' | 'right'; text?: strin
         )}
       >
         {text}
+        {streaming && <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-fg-2 animate-pulse align-text-bottom" />}
         {children}
       </div>
     </div>
   );
 }
 
+// ── ask_user (chips / text) ───────────────────────────────────────────────
 
-// ── Phase plan (chat-bubble with approve / comment under it) ──────────────
-
-function PhasePlanRow({ event, session, sessionId, onAction, busy, setBusy }: RowProps) {
-  const p = event.payload as {
-    phase: string;
-    title?: string;
-    summary?: string;
-    plan_markdown?: string;
-    requires_approval?: boolean;
-    steps?: string[];
-  };
-  const [comment, setComment] = useState('');
-  const [showComment, setShowComment] = useState(false);
+function AskRow({ item, session, sessionId, busy, setBusy, onAction }: RowProps & { item: Extract<Item, { type: 'ask' }> }) {
+  const [single, setSingle] = useState('');
+  const [multi, setMulti] = useState<string[]>([]);
+  const [text, setText] = useState('');
   const [acted, setActed] = useState(false);
+  const active = !item.answered && !acted && session?.pendingQuestion?.questionId === item.questionId;
 
-  const approve = async () => {
+  const submit = async () => {
+    const value = item.kind === 'multi' ? multi.join(', ') : item.kind === 'text' ? text.trim() : single;
+    if (!value) return;
     setBusy(true);
     setActed(true);
     try {
-      await api(`/api/sessions/${sessionId}/phase/${p.phase}/approve`, { method: 'POST' });
-      onAction();
-    } catch (e) {
-      setActed(false);
-    } finally { setBusy(false); }
-  };
-
-  const submitComment = async () => {
-    if (!comment.trim()) return;
-    setBusy(true);
-    setActed(true);
-    try {
-      await api(`/api/sessions/${sessionId}/phase/${p.phase}/comment`, {
+      await api(`/api/sessions/${sessionId}/messages`, {
         method: 'POST',
-        body: JSON.stringify({ text: comment.trim() }),
+        body: JSON.stringify({ text: value, questionId: item.questionId }),
       });
-      setComment('');
-      setShowComment(false);
       onAction();
-    } catch (e) {
+    } catch {
       setActed(false);
-    } finally { setBusy(false); }
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
     <div className="flex justify-start">
       <div className="max-w-[88%] space-y-2">
-        <Bubble side="left">
-          <div className="space-y-1.5">
-            {p.title && <div className="text-[12px] font-bold">{p.title}</div>}
-            {p.summary && <div className="text-[12.5px]">{p.summary}</div>}
-            {p.steps && p.steps.length > 0 && (
-              <ol className="list-decimal pl-4 space-y-0.5 text-[12px] text-fg-2">
-                {p.steps.map((s, i) => (
-                  <li key={i}>{s}</li>
+        <Bubble side="left" text={item.question} />
+        {active && (
+          <div className="space-y-2 pl-1">
+            {(item.kind === 'single' || item.kind === 'yes_no') && (
+              <div className="flex flex-wrap gap-1.5">
+                {(item.options ?? (item.kind === 'yes_no' ? ['yes', 'no'] : [])).map((o) => (
+                  <button
+                    key={o}
+                    onClick={() => setSingle(o)}
+                    className={cn(
+                      'px-3 py-1 rounded-full text-[11px] border transition-all',
+                      single === o ? 'bg-fg text-bg border-fg' : 'bg-bg-2 text-fg-2 border-border hover:text-fg',
+                    )}
+                  >
+                    {o}
+                  </button>
                 ))}
-              </ol>
+              </div>
             )}
-          </div>
-        </Bubble>
-        {p.requires_approval && !acted && session?.state === 'awaiting_approval' && (
-          <div className="flex items-center gap-2 pl-1">
+            {item.kind === 'multi' && (
+              <div className="flex flex-wrap gap-1.5">
+                {(item.options ?? []).map((o) => {
+                  const on = multi.includes(o);
+                  return (
+                    <button
+                      key={o}
+                      onClick={() => setMulti((arr) => (on ? arr.filter((x) => x !== o) : [...arr, o]))}
+                      className={cn(
+                        'px-3 py-1 rounded-full text-[11px] border transition-all',
+                        on ? 'bg-fg text-bg border-fg' : 'bg-bg-2 text-fg-2 border-border hover:text-fg',
+                      )}
+                    >
+                      {o}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {item.kind === 'text' && (
+              <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                rows={2}
+                placeholder="Type your answer…"
+                className="w-full bg-bg-2 border border-border rounded-lg px-3 py-2 text-[12px] text-fg placeholder:text-fg-3 outline-none focus:border-fg-3 resize-none"
+              />
+            )}
             <button
-              disabled={busy}
-              onClick={approve}
+              onClick={submit}
+              disabled={busy || (item.kind === 'multi' ? multi.length === 0 : item.kind === 'text' ? !text.trim() : !single)}
               className="px-3 py-1 rounded-full bg-fg text-bg text-[11px] font-medium disabled:opacity-30 hover:opacity-90"
-            >
-              Approve
-            </button>
-            <button
-              disabled={busy}
-              onClick={() => setShowComment((s) => !s)}
-              className="px-3 py-1 rounded-full bg-bg-2 text-fg-2 border border-border text-[11px] font-medium hover:text-fg disabled:opacity-30"
-            >
-              Comment
-            </button>
-          </div>
-        )}
-        {showComment && (
-          <div className="flex items-center gap-2 pl-1">
-            <input
-              value={comment}
-              onChange={(e) => setComment(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') submitComment();
-              }}
-              placeholder="Tell the agent what to change..."
-              className="flex-1 bg-bg-2 border border-border rounded-full px-3 py-1.5 text-[12px] text-fg placeholder:text-fg-3 outline-none focus:border-fg-3"
-            />
-            <button
-              disabled={busy || !comment.trim()}
-              onClick={submitComment}
-              className="px-3 py-1.5 rounded-full bg-fg text-bg text-[11px] font-medium disabled:opacity-30 hover:opacity-90"
             >
               Send
             </button>
@@ -451,38 +448,86 @@ function PhasePlanRow({ event, session, sessionId, onAction, busy, setBusy }: Ro
   );
 }
 
+// ── approval.requested (plan / command / hf upload) ───────────────────────
 
-// ── Clarification (chat bubble + chip choices) ────────────────────────────
-
-function ClarificationRow({ event, session, sessionId, onAction, busy, setBusy }: RowProps) {
-  const q = event.payload as {
-    question_id: string;
-    question: string;
-    kind: 'single_choice' | 'multi_choice' | 'text' | 'yes_no';
-    options?: string[];
-    context?: string;
-  };
-  const [single, setSingle] = useState<string>('');
-  const [multi, setMulti] = useState<string[]>([]);
-  const [text, setText] = useState<string>('');
+function ApprovalRow({ item, session, sessionId, busy, setBusy, onAction }: RowProps & { item: Extract<Item, { type: 'approval' }> }) {
   const [acted, setActed] = useState(false);
-  const answered = session?.clarifications?.some((c) => c.question_id === q.question_id);
+  const active = !item.decided && !acted && session?.pendingApproval?.approvalId === item.approvalId;
 
-  const submit = async () => {
+  const decide = async (approved: boolean) => {
     setBusy(true);
     setActed(true);
     try {
-      const value = q.kind === 'multi_choice' ? multi : q.kind === 'text' ? text.trim() : single;
-      if (q.kind === 'multi_choice' ? multi.length === 0 : !value) {
-        setActed(false);
-        return;
-      }
-      await api(`/api/sessions/${sessionId}/clarifications/${q.question_id}`, {
+      await api(`/api/sessions/${sessionId}/approvals/${item.approvalId}`, {
         method: 'POST',
-        body: JSON.stringify({ value }),
+        body: JSON.stringify({ approved }),
       });
       onAction();
-    } catch (e) {
+    } catch {
+      setActed(false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[88%] space-y-2">
+        <Bubble side="left">
+          <div className="space-y-1.5">
+            <div className="text-[12px] font-bold">{item.summary || `Approval needed: ${item.tool}`}</div>
+            {item.body && (
+              <pre className="text-[11px] text-fg-2 whitespace-pre-wrap break-words font-mono bg-bg rounded-lg p-2 border border-border max-h-64 overflow-y-auto">
+                {item.body}
+              </pre>
+            )}
+          </div>
+        </Bubble>
+        {item.decided && (
+          <div className="text-[10px] text-fg-3 pl-1">{item.approved ? 'Approved' : 'Denied'}</div>
+        )}
+        {active && (
+          <div className="flex items-center gap-2 pl-1">
+            <button
+              disabled={busy}
+              onClick={() => decide(true)}
+              className="px-3 py-1 rounded-full bg-fg text-bg text-[11px] font-medium disabled:opacity-30 hover:opacity-90"
+            >
+              Approve
+            </button>
+            <button
+              disabled={busy}
+              onClick={() => decide(false)}
+              className="px-3 py-1 rounded-full bg-bg-2 text-fg-2 border border-border text-[11px] font-medium hover:text-fg disabled:opacity-30"
+            >
+              Deny
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── budget.exceeded (top-up) ──────────────────────────────────────────────
+
+function BudgetRow({ item, session, sessionId, busy, setBusy, onAction }: RowProps & { item: Extract<Item, { type: 'budget' }> }) {
+  const [amount, setAmount] = useState(item.deltaNeeded ? String(Math.ceil(item.deltaNeeded * 100) / 100) : '1');
+  const [acted, setActed] = useState(false);
+  const active = !item.resolved && !acted && session?.status === 'paused_budget';
+
+  const topUp = async () => {
+    const add = Number.parseFloat(amount);
+    if (!Number.isFinite(add) || add <= 0) return;
+    setBusy(true);
+    setActed(true);
+    try {
+      await api(`/api/sessions/${sessionId}/budget`, {
+        method: 'POST',
+        body: JSON.stringify({ addUsd: add }),
+      });
+      onAction();
+    } catch {
       setActed(false);
     } finally {
       setBusy(false);
@@ -494,221 +539,27 @@ function ClarificationRow({ event, session, sessionId, onAction, busy, setBusy }
       <div className="max-w-[88%] space-y-2">
         <Bubble side="left">
           <div className="space-y-1">
-            <div className="text-[12.5px]">{q.question}</div>
-            {q.context && <div className="text-[11px] text-fg-2">{q.context}</div>}
-          </div>
-        </Bubble>
-        {!answered && !acted && (
-          <div className="space-y-2 pl-1">
-            {q.kind === 'single_choice' && (
-              <div className="flex flex-wrap gap-1.5">
-                {(q.options ?? []).map((o) => (
-                  <button
-                    key={o}
-                    onClick={() => setSingle(o)}
-                    className={cn(
-                      'px-3 py-1 rounded-full text-[11px] border transition-all',
-                      single === o
-                        ? 'bg-fg text-bg border-fg'
-                        : 'bg-bg-2 text-fg-2 border-border hover:text-fg',
-                    )}
-                  >
-                    {o}
-                  </button>
-                ))}
-              </div>
-            )}
-            {q.kind === 'multi_choice' && (
-              <div className="flex flex-wrap gap-1.5">
-                {(q.options ?? []).map((o) => {
-                  const on = multi.includes(o);
-                  return (
-                    <button
-                      key={o}
-                      onClick={() =>
-                        setMulti((arr) => (on ? arr.filter((x) => x !== o) : [...arr, o]))
-                      }
-                      className={cn(
-                        'px-3 py-1 rounded-full text-[11px] border transition-all',
-                        on
-                          ? 'bg-fg text-bg border-fg'
-                          : 'bg-bg-2 text-fg-2 border-border hover:text-fg',
-                      )}
-                    >
-                      {o}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-            {q.kind === 'text' && (
-              <textarea
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                rows={2}
-                placeholder="Type your answer..."
-                className="w-full bg-bg-2 border border-border rounded-lg px-3 py-2 text-[12px] text-fg placeholder:text-fg-3 outline-none focus:border-fg-3 resize-none"
-              />
-            )}
-            {q.kind === 'yes_no' && (
-              <div className="flex gap-1.5">
-                {['yes', 'no'].map((o) => (
-                  <button
-                    key={o}
-                    onClick={() => setSingle(o)}
-                    className={cn(
-                      'px-4 py-1 rounded-full text-[11px] border transition-all',
-                      single === o
-                        ? 'bg-fg text-bg border-fg'
-                        : 'bg-bg-2 text-fg-2 border-border hover:text-fg',
-                    )}
-                  >
-                    {o}
-                  </button>
-                ))}
-              </div>
-            )}
-            <button
-              onClick={submit}
-              disabled={busy || (q.kind === 'multi_choice' ? multi.length === 0 : q.kind === 'text' ? !text.trim() : !single)}
-              className="px-3 py-1 rounded-full bg-fg text-bg text-[11px] font-medium disabled:opacity-30 hover:opacity-90"
-            >
-              Send
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-
-// ── Pipeline approval (chat bubble + approve / reject) ────────────────────
-
-function ApprovalRow({ event, session, sessionId, onAction, busy, setBusy }: RowProps) {
-  const [acted, setActed] = useState(false);
-  const decided = session?.state !== 'awaiting_approval' || acted;
-  const summary = (event.payload.summary as { summary?: string }) ?? {};
-  const minutes = Number(event.payload.estimated_minutes ?? 0);
-
-  const decide = async (approve: boolean) => {
-    setBusy(true);
-    setActed(true);
-    try {
-      await api(`/api/sessions/${sessionId}/approve`, {
-        method: 'POST',
-        body: JSON.stringify({ approve, reason: approve ? 'user approved' : 'user rejected' }),
-      });
-      onAction();
-    } catch (e) {
-      setActed(false);
-    } finally { setBusy(false); }
-  };
-
-  return (
-    <div className="flex justify-start">
-      <div className="max-w-[88%] space-y-2">
-        <Bubble side="left">
-          <div className="space-y-1">
-            <div className="text-[12px] font-bold">Pipeline ready - approve to start training</div>
-            {summary.summary && <div className="text-[12px] text-fg-2 whitespace-pre-wrap">{summary.summary}</div>}
-            {minutes > 0 && <div className="text-[11px] text-fg-3">~{minutes.toFixed(0)} minutes estimated</div>}
-          </div>
-        </Bubble>
-        {!decided && !acted && (
-          <div className="flex items-center gap-2 pl-1">
-            <button
-              disabled={busy}
-              onClick={() => decide(true)}
-              className="px-3 py-1 rounded-full bg-fg text-bg text-[11px] font-medium disabled:opacity-30 hover:opacity-90"
-            >
-              Approve & run
-            </button>
-            <button
-              disabled={busy}
-              onClick={() => decide(false)}
-              className="px-3 py-1 rounded-full bg-bg-2 text-fg-2 border border-border text-[11px] font-medium hover:text-fg disabled:opacity-30"
-            >
-              Reject
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-
-// ── Recovery + evaluation + export rows ──────────────────────────────────
-
-function RecoveryRow({ event }: { event: AgentEvent }) {
-  const p = event.payload as { rationale?: string };
-  return <Bubble side="left" text={`Recovery plan: ${p.rationale ?? 'see audit log'}`} />;
-}
-
-function EvaluationRow({ event }: { event: AgentEvent }) {
-  const e = (event.payload.evaluation as Record<string, unknown>) ?? {};
-  const score = typeof e.score === 'number' ? `${(e.score * 100).toFixed(1)}%` : '-';
-  const loss = typeof e.final_loss === 'number' ? e.final_loss.toFixed(4) : '-';
-  return <Bubble side="left" text={`Evaluation: score ${score}, final loss ${loss}.`} />;
-}
-
-function ExportRow({ event, sessionId, onAction, busy, setBusy, session }: RowProps) {
-  const decided = session?.state !== 'awaiting_export_choice';
-  const [choice, setChoice] = useState<'local' | 'hf' | 'both'>('local');
-  const [repoId, setRepoId] = useState<string>('');
-
-  const [acted, setActed] = useState(false);
-
-  const submit = async () => {
-    if ((choice === 'hf' || choice === 'both') && !repoId.trim()) return;
-    setBusy(true);
-    setActed(true);
-    try {
-      await api(`/api/sessions/${sessionId}/export`, {
-        method: 'POST',
-        body: JSON.stringify({ choice, hf_repo_id: repoId.trim() || undefined }),
-      });
-      onAction();
-    } catch (e) {
-      setActed(false);
-    } finally { setBusy(false); }
-  };
-
-  return (
-    <div className="flex justify-start">
-      <div className="max-w-[88%] space-y-2">
-        <Bubble side="left" text="Where should the trained model go?" />
-        {!decided && !acted && (
-          <div className="space-y-2 pl-1">
-            <div className="flex gap-1.5">
-              {(['local', 'hf', 'both'] as const).map((c) => (
-                <button
-                  key={c}
-                  onClick={() => setChoice(c)}
-                  className={cn(
-                    'px-3 py-1 rounded-full text-[11px] border transition-all',
-                    choice === c ? 'bg-fg text-bg border-fg' : 'bg-bg-2 text-fg-2 border-border hover:text-fg',
-                  )}
-                >
-                  {c === 'hf' ? 'HuggingFace' : c}
-                </button>
-              ))}
+            <div className="text-[12px] font-bold">Budget limit reached</div>
+            <div className="text-[12px] text-fg-2">
+              ${item.spentUsd.toFixed(2)} spent of ${item.budgetUsd.toFixed(2)}.
+              {item.deltaNeeded !== undefined && ` Roughly $${item.deltaNeeded.toFixed(2)} more needed to finish.`}
             </div>
-            {(choice === 'hf' || choice === 'both') && (
-              <input
-                value={repoId}
-                onChange={(e) => setRepoId(e.target.value)}
-                placeholder="user/my-trained-model"
-                className="w-full bg-bg-2 border border-border rounded-full px-3 py-1.5 text-[12px] text-fg placeholder:text-fg-3 outline-none focus:border-fg-3"
-              />
-            )}
+          </div>
+        </Bubble>
+        {active && (
+          <div className="flex items-center gap-2 pl-1">
+            <span className="text-[11px] text-fg-3">Add $</span>
+            <input
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              className="w-20 bg-bg-2 border border-border rounded-full px-3 py-1.5 text-[12px] text-fg outline-none focus:border-fg-3"
+            />
             <button
-              onClick={submit}
-              disabled={busy || ((choice === 'hf' || choice === 'both') && !repoId.trim())}
+              disabled={busy}
+              onClick={topUp}
               className="px-3 py-1 rounded-full bg-fg text-bg text-[11px] font-medium disabled:opacity-30 hover:opacity-90"
             >
-              Confirm
+              Add budget & continue
             </button>
           </div>
         )}
@@ -716,15 +567,14 @@ function ExportRow({ event, sessionId, onAction, busy, setBusy, session }: RowPr
     </div>
   );
 }
-
 
 // ── Bottom message bar ────────────────────────────────────────────────────
 
-function MessageBar({ sessionId, disabled }: { sessionId: string; disabled: boolean }) {
+function MessageBar({ sessionId }: { sessionId: string }) {
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
   const send = async () => {
-    if (!text.trim() || disabled) return;
+    if (!text.trim()) return;
     setSending(true);
     try {
       await api(`/api/sessions/${sessionId}/messages`, {
@@ -732,7 +582,9 @@ function MessageBar({ sessionId, disabled }: { sessionId: string; disabled: bool
         body: JSON.stringify({ text: text.trim() }),
       });
       setText('');
-    } finally { setSending(false); }
+    } finally {
+      setSending(false);
+    }
   };
   return (
     <div className="border-t border-border-2 p-3 flex items-end gap-2 bg-bg">
@@ -746,35 +598,17 @@ function MessageBar({ sessionId, disabled }: { sessionId: string; disabled: bool
           }
         }}
         rows={1}
-        disabled={disabled || sending}
-        placeholder={disabled ? 'session closed' : 'Message the agent...'}
+        disabled={sending}
+        placeholder="Message the agent…"
         className="flex-1 bg-bg-2 border border-border rounded-2xl px-4 py-2 text-[13px] text-fg placeholder:text-fg-3 outline-none focus:border-fg-3 resize-none max-h-32"
       />
       <button
         onClick={send}
-        disabled={!text.trim() || disabled || sending}
+        disabled={!text.trim() || sending}
         className="w-9 h-9 rounded-full bg-fg text-bg flex items-center justify-center disabled:opacity-30 hover:opacity-90"
       >
         <Send className="w-3.5 h-3.5" />
       </button>
     </div>
   );
-}
-
-
-// ── Helpers ───────────────────────────────────────────────────────────────
-
-function stringifyValue(v: unknown): string {
-  if (Array.isArray(v)) return v.join(', ');
-  if (typeof v === 'object' && v !== null) return JSON.stringify(v);
-  return String(v ?? '');
-}
-
-function summariseExport(v: unknown): string {
-  if (!v || typeof v !== 'object') return '';
-  const e = v as { local?: { local_path?: string }; hf?: { repo_id?: string } };
-  const parts: string[] = [];
-  if (e.local?.local_path) parts.push(`local: ${e.local.local_path}`);
-  if (e.hf?.repo_id) parts.push(`hf: ${e.hf.repo_id}`);
-  return parts.join(' - ');
 }
