@@ -15,6 +15,7 @@ import { useSessionEvents } from '@/lib/sse';
 import { AgentActivity } from '@/components/AgentActivity';
 import { AgentGraph } from '@/components/AgentGraph';
 import { BudgetBar } from '@/components/BudgetBar';
+import { TrainingCanvas } from '@/components/TrainingCanvas';
 import { cn } from '@/lib/cn';
 import { Bot, Database, GitBranch, LineChart, Loader2, Plus, Upload, XCircle } from 'lucide-react';
 
@@ -250,9 +251,7 @@ export default function PlaygroundPage() {
             view === 'agents' ? (
               <AgentGraph events={graphEvents} />
             ) : (
-              <div className="h-full flex items-center justify-center text-[11px] uppercase tracking-widest text-white/30 font-black">
-                Training telemetry lands in M5
-              </div>
+              <TrainingCanvas events={graphEvents} />
             )
           ) : (
             <EmptyState hasSession={false} />

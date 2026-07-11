@@ -1,3 +1,4 @@
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { ulid } from 'ulid';
@@ -8,6 +9,8 @@ import { runAgentLoop } from './agent/loop';
 import { ensureMemory } from './agent/memory';
 import { SteeringQueue } from './agent/steering';
 import { orchestrator } from './agent/definitions/orchestrator';
+import { TrainingWatcher } from './watch/trainingWatcher';
+import { isAlive, killTree } from './exec/terminal';
 
 interface ActiveRun {
   steering: SteeringQueue;
@@ -29,6 +32,7 @@ export class SessionManager {
    *  the answering routes fall back to a wake() when no waiter exists. */
   private readonly approvalWaiters = new Map<string, (approved: boolean) => void>();
   private readonly questionWaiters = new Map<string, (answer: string) => void>();
+  private readonly watchers = new Map<string, TrainingWatcher>();
 
   constructor(readonly config: AppConfig) {
     this.bus = new EventBus(config.dataDir);
@@ -103,6 +107,17 @@ export class SessionManager {
   handleUserMessage(sessionId: string, text: string): { queued: boolean } {
     this.bus.emit(sessionId, 'chat.message', { role: 'user', text });
 
+    // Hard-wired stop intent: kill session processes BEFORE the LLM sees it.
+    if (/^\s*(stop|abort|cancel|halt|kill)\b/i.test(text)) {
+      const killed = this.killSessionProcesses(sessionId);
+      if (killed > 0) {
+        this.bus.emit(sessionId, 'chat.message', {
+          role: 'system',
+          text: `Stopped ${killed} running process(es) immediately.`,
+        });
+      }
+    }
+
     const act = this.active.get(sessionId);
     if (act) {
       act.steering.push(text);
@@ -136,6 +151,7 @@ export class SessionManager {
   }
 
   cancelSession(sessionId: string): boolean {
+    this.killSessionProcesses(sessionId);
     const act = this.active.get(sessionId);
     // Reject any interactive waits and clear the persisted pendings.
     const session = this.store.get(sessionId);
@@ -272,6 +288,79 @@ export class SessionManager {
     return true;
   }
 
+  // ---- training watch (M5: the detach/wake mechanic) ----
+
+  /** Attach the pure-code watcher; the LLM loop suspends until it fires. */
+  attachTrainingWatcher(args: {
+    sessionId: string;
+    pid: number;
+    logFile: string;
+    metricsFile: string;
+    stallMinutes: number;
+    initialLogOffset?: number;
+    initialMetricsOffset?: number;
+  }): void {
+    this.watchers.get(args.sessionId)?.dispose();
+    // Fresh attach: start at the metrics file's CURRENT size — a previous
+    // run's appended metrics must not poison this run's loss statistics
+    // (false divergence). Resume passes explicit offsets instead.
+    const metricsStart =
+      args.initialMetricsOffset ??
+      (existsSync(args.metricsFile) ? statSync(args.metricsFile).size : 0);
+    const logStart = args.initialLogOffset ?? 0; // each bg run gets a unique log file
+    this.store.update(args.sessionId, (r) => {
+      r.watcher = {
+        pid: args.pid,
+        logFile: args.logFile,
+        metricsFile: args.metricsFile,
+        logOffset: logStart,
+        metricsOffset: metricsStart,
+        stallMinutes: args.stallMinutes,
+      };
+      r.status = 'training';
+    });
+    this.bus.emit(args.sessionId, 'session.status', { status: 'training' });
+    const watcher = new TrainingWatcher({
+      ...args,
+      initialLogOffset: logStart,
+      initialMetricsOffset: metricsStart,
+      bus: this.bus,
+      store: this.store,
+      onWake: (notification) => {
+        this.watchers.delete(args.sessionId);
+        this.store.update(args.sessionId, (r) => {
+          r.watcher = null;
+          if (r.status === 'training') r.status = 'idle';
+        });
+        this.wake(args.sessionId, notification);
+      },
+    });
+    this.watchers.set(args.sessionId, watcher);
+    watcher.start();
+  }
+
+  /** Kill all live processes of a session + dispose its watcher. */
+  killSessionProcesses(sessionId: string): number {
+    const session = this.store.get(sessionId);
+    let killed = 0;
+    for (const proc of session?.processes ?? []) {
+      if (isAlive(proc.pid)) {
+        killTree(proc.pid);
+        killed++;
+      }
+    }
+    const watcher = this.watchers.get(sessionId);
+    if (watcher) {
+      watcher.dispose();
+      this.watchers.delete(sessionId);
+      this.store.update(sessionId, (r) => {
+        r.watcher = null;
+        if (r.status === 'training') r.status = 'idle';
+      });
+    }
+    return killed;
+  }
+
   /** Budget top-up: raise the ceiling and resume a budget-paused loop. */
   topUpBudget(sessionId: string, addUsd: number): { newBudgetUsd: number } | null {
     const rec = this.store.update(sessionId, (r) => {
@@ -369,8 +458,37 @@ export class SessionManager {
         this.store.update(session.id, (r) => {
           r.status = 'interrupted';
         });
+      } else if (session.status === 'training' && session.watcher) {
+        const w = session.watcher;
+        if (isAlive(w.pid)) {
+          // Training survived the restart — re-attach at the stored offsets.
+          console.log(`[finetune-studio] re-attaching training watcher (session ${session.id}, pid ${w.pid})`);
+          this.attachTrainingWatcher({
+            sessionId: session.id,
+            pid: w.pid,
+            logFile: w.logFile,
+            metricsFile: w.metricsFile,
+            stallMinutes: w.stallMinutes,
+            initialLogOffset: w.logOffset,
+            initialMetricsOffset: w.metricsOffset,
+          });
+        } else {
+          // The run ended while we were down — classify from the log tail.
+          const tail = this.readTail(w.logFile, 1_500);
+          const failed = /error|failed|traceback/i.test(tail);
+          this.store.update(session.id, (r) => {
+            r.watcher = null;
+            r.status = 'idle';
+          });
+          this.bus.emit(session.id, 'train.phase', { phase: failed ? 'failed' : 'finished', pid: w.pid });
+          this.wake(
+            session.id,
+            `[training notification] the server restarted; training process ${w.pid} is no longer running — it ${
+              failed ? 'appears to have FAILED' : 'appears to have finished'
+            }. Log tail:\n${tail}\nVerify output/ and continue accordingly.`,
+          );
+        }
       }
-      // M5: re-attach training watchers / synthesize wake for finished runs.
     }
     console.log('[finetune-studio] runtime ready', {
       dataDir: this.config.dataDir,
@@ -378,6 +496,17 @@ export class SessionManager {
       approvalMode: this.config.approvalMode,
       sessions: this.store.list().length,
     });
+  }
+
+  private readTail(file: string, chars: number): string {
+    try {
+      if (!existsSync(file)) return '(log file missing)';
+      const size = statSync(file).size;
+      const text = readFileSync(file, 'utf8');
+      return text.slice(Math.max(0, size - chars));
+    } catch {
+      return '(unreadable log)';
+    }
   }
 }
 

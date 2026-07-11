@@ -48,7 +48,7 @@ export interface PendingQuestion {
 export interface WatcherState {
   pid: number;
   logFile: string;
-  metricsFile?: string;
+  metricsFile: string;
   logOffset: number;
   metricsOffset: number;
   stallMinutes: number;
@@ -195,6 +195,21 @@ export class SessionStore {
     mkdirSync(path.dirname(file), { recursive: true });
     const tmp = `${file}.${process.pid}.tmp`;
     writeFileSync(tmp, content, 'utf8');
-    renameSync(tmp, file);
+    // Windows: rename fails with EPERM/EBUSY when another handle briefly has
+    // the destination open (concurrent reads, AV scans). Retry with backoff —
+    // the graceful-fs approach.
+    let delay = 2;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        renameSync(tmp, file);
+        return;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (attempt >= 20 || !['EPERM', 'EBUSY', 'EACCES'].includes(code ?? '')) throw err;
+        // Synchronous backoff (Node allows Atomics.wait on the main thread).
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+        delay = Math.min(delay * 2, 50);
+      }
+    }
   }
 }
